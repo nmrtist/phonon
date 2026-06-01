@@ -12,6 +12,7 @@ mod selection;
 mod services;
 mod state;
 mod structure_editor;
+mod structure_import;
 mod task_executor;
 mod ui;
 mod viewport;

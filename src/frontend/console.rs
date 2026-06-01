@@ -14,7 +14,7 @@ use crate::{
         state::{AppState, AtomStyle},
         viewport::{ViewportPngExport, export_viewport_png},
     },
-    io::{pdb_fetch, structure_io},
+    io::pdb_fetch,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -177,10 +177,11 @@ fn parse_fetch_command_args(args: &[String]) -> Result<ParsedFetchCommand> {
 /// Load a structure file at `path` into a new active entry, resetting the
 /// viewport. Shared by the `open` and `fetch` commands.
 fn open_structure_path(state: &mut AppState, path: PathBuf) -> Result<()> {
-    let structure = structure_io::load_structure(&path)?;
-    let save_path = structure_io::default_structure_save_path(&structure, Some(&path));
+    let document = crate::frontend::structure_import::load_document(&path)?;
     state.save_viewport_for_active_entry();
-    let entry_id = state.entries.add_entry(structure, Some(path), save_path);
+    let entry_id =
+        crate::frontend::structure_import::import_document(&mut state.entries, document, path)
+            .ok_or_else(|| anyhow!("structure file did not contain any models"))?;
     state.entries.activate_entry(entry_id);
     state.history.set_active_entry(Some(entry_id));
     state.ui.entry_list.selected_entry_id = Some(entry_id);

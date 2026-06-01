@@ -143,6 +143,31 @@ impl EntryStore {
         entry_id
     }
 
+    /// Insert an entry into `group_id` (empty for ungrouped) with an optional
+    /// explicit `name` (falling back to the title-derived name). When `activate`
+    /// is set, the entry gets an open tab and becomes active; otherwise it is
+    /// added to the entry list without opening a tab. Used to import a
+    /// multi-model PDB as a group where only the first model opens.
+    pub fn add_entry_to_group(
+        &mut self,
+        structure: Structure,
+        source_path: Option<PathBuf>,
+        save_path: PathBuf,
+        group_id: String,
+        name: Option<String>,
+        activate: bool,
+    ) -> u64 {
+        let entry_id = self.insert_entry(structure, source_path, save_path, group_id);
+        if let Some(name) = name {
+            self.rename_entry(entry_id, name);
+        }
+        if activate {
+            self.ensure_tab_for_entry(entry_id);
+            self.activate_entry(entry_id);
+        }
+        entry_id
+    }
+
     fn insert_entry(
         &mut self,
         structure: Structure,

@@ -9,12 +9,6 @@ use crate::{
     workflows::reticular::{ReticularBuildSpec, build_framework},
 };
 
-pub struct LoadedStructure {
-    pub structure: Structure,
-    pub source_path: PathBuf,
-    pub save_path: PathBuf,
-}
-
 pub struct BuiltFramework {
     pub structure: Structure,
     pub save_path: PathBuf,
@@ -28,16 +22,6 @@ impl StructureService {
         rfd::FileDialog::new()
             .add_filter("Structure", structure_io::readable_extensions())
             .pick_file()
-    }
-
-    pub fn open_path(path: PathBuf) -> Result<LoadedStructure> {
-        let structure = structure_io::load_structure(&path)?;
-        let save_path = structure_io::default_structure_save_path(&structure, Some(path.as_path()));
-        Ok(LoadedStructure {
-            structure,
-            source_path: path,
-            save_path,
-        })
     }
 
     pub fn save(structure: &Structure, path: &Path) -> Result<()> {

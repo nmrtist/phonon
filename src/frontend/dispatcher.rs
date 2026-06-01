@@ -33,6 +33,7 @@ use crate::{
             BuildingBlockService, ReticularService, StructureService, require_periodic_structure,
         },
         state::AppState,
+        structure_import::{import_document, load_document},
         task_executor::task_executor,
     },
     io::{pdb_fetch, structure_io},
@@ -873,15 +874,13 @@ pub fn open_paths(state: &mut AppState, paths: impl IntoIterator<Item = PathBuf>
     let mut failed = Vec::<String>::new();
 
     for path in paths {
-        match StructureService::open_path(path.clone()) {
-            Ok(loaded) => {
-                let entry_id = state.entries.add_entry(
-                    loaded.structure,
-                    Some(loaded.source_path),
-                    loaded.save_path,
-                );
-                opened.push((entry_id, path));
-            }
+        match load_document(&path) {
+            Ok(document) => match import_document(&mut state.entries, document, path.clone()) {
+                Some(entry_id) => opened.push((entry_id, path)),
+                None => {
+                    failed.push(format!("{}: no models found", path.display()));
+                }
+            },
             Err(error) => failed.push(format!("{}: {error}", path.display())),
         }
     }

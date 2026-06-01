@@ -17,20 +17,55 @@ use crate::domain::{
     chemistry::{infer_bonds_with_cell, normalized_symbol},
 };
 
+/// A parsed PDB file. NMR depositions carry many alternative conformers as
+/// `MODEL`/`ENDMDL` blocks; each becomes one [`Structure`] in `models`.
+pub struct PdbDocument {
+    /// The deposition title (from `TITLE`, falling back to the `HEADER`
+    /// classification, then a generic placeholder).
+    pub title: String,
+    /// The four-character PDB identifier from the `HEADER` record, if present.
+    pub pdb_id: Option<String>,
+    /// One entry per `MODEL` block, or a single entry for a single-model file.
+    pub models: Vec<Structure>,
+}
+
+/// Parse a PDB file into a single [`Structure`]. For multi-model (NMR)
+/// depositions only the first model is returned; use [`parse_pdb_document`] to
+/// access every conformer.
 pub fn parse_pdb(input: &str) -> Result<Structure> {
+    let mut document = parse_pdb_document(input)?;
+    Ok(document.models.swap_remove(0))
+}
+
+/// Parse a PDB file, preserving each `MODEL` block as a separate structure
+/// along with the deposition title and PDB identifier.
+pub fn parse_pdb_document(input: &str) -> Result<PdbDocument> {
     let mut title_lines = Vec::new();
+    let mut classification = None;
+    let mut pdb_id = None;
     let mut inferred_cell = None;
-    let mut atoms = Vec::new();
-    let mut annotations = Vec::new();
-    let mut serial_to_index = HashMap::new();
-    let mut identity_to_index = HashMap::new();
     let mut conect_pairs = BTreeMap::new();
     let mut link_pairs = Vec::new();
     let mut secondary_structures = Vec::new();
 
+    // Atoms are partitioned by `MODEL`/`ENDMDL`. Files without `MODEL` records
+    // accumulate every atom into a single implicit model.
+    let mut models: Vec<Vec<ParsedAtom>> = Vec::new();
+    let mut current_model: Vec<ParsedAtom> = Vec::new();
+
     for (line_index, line) in input.lines().enumerate() {
         let line_number = line_index + 1;
         match field(line, 0, 6).trim() {
+            "HEADER" => {
+                let class = field(line, 10, 50).trim();
+                if !class.is_empty() {
+                    classification = Some(class.to_string());
+                }
+                let id = field(line, 62, 66).trim();
+                if !id.is_empty() {
+                    pdb_id = Some(id.to_string());
+                }
+            }
             "TITLE" => {
                 let title = field(line, 10, 80).trim();
                 if !title.is_empty() {
@@ -38,16 +73,15 @@ pub fn parse_pdb(input: &str) -> Result<Structure> {
                 }
             }
             "CRYST1" => inferred_cell = parse_cryst1_line(line),
+            // Flush the accumulated atoms at each model boundary; empty flushes
+            // (e.g. records between `ENDMDL` and the next `MODEL`) are dropped
+            // afterwards.
+            "MODEL" | "ENDMDL" => models.push(std::mem::take(&mut current_model)),
             "ATOM" | "HETATM" => {
                 let Some(parsed) = parse_atom_record(line, line_number)? else {
                     continue;
                 };
-                let atom_index = atoms.len();
-                let identity = parsed.identity();
-                atoms.push(parsed.atom);
-                annotations.push(parsed.annotation);
-                serial_to_index.entry(parsed.serial).or_insert(atom_index);
-                identity_to_index.entry(identity).or_insert(atom_index);
+                current_model.push(parsed);
             }
             "CONECT" => parse_conect_line(line, line_number, &mut conect_pairs)?,
             "LINK" => parse_link_line(line, line_number, &mut link_pairs)?,
@@ -57,38 +91,93 @@ pub fn parse_pdb(input: &str) -> Result<Structure> {
         }
     }
 
-    if atoms.is_empty() {
+    // Tolerate a trailing model with no closing `ENDMDL`, and the single-model
+    // case where no `MODEL` records appear at all.
+    if !current_model.is_empty() {
+        models.push(current_model);
+    }
+    models.retain(|model| !model.is_empty());
+
+    if models.is_empty() {
         bail!("structure does not contain any atoms after filtering supported conformers");
     }
 
-    let stored_cell = match &inferred_cell {
+    let title = if !title_lines.is_empty() {
+        title_lines.join(" ")
+    } else if let Some(classification) = &classification {
+        classification.clone()
+    } else {
+        "PDB structure".to_string()
+    };
+
+    let built = models
+        .into_iter()
+        .map(|atoms| {
+            build_model_structure(
+                atoms,
+                title.clone(),
+                inferred_cell.as_ref(),
+                &conect_pairs,
+                &link_pairs,
+                &secondary_structures,
+            )
+        })
+        .collect();
+
+    Ok(PdbDocument {
+        title,
+        pdb_id,
+        models: built,
+    })
+}
+
+/// Assemble one model's parsed atoms into a [`Structure`], applying the
+/// file-level bonding (`CONECT`/`LINK`) and secondary-structure records that
+/// are shared across every model.
+fn build_model_structure(
+    parsed_atoms: Vec<ParsedAtom>,
+    title: String,
+    inferred_cell: Option<&UnitCell>,
+    conect_pairs: &BTreeMap<(usize, usize), usize>,
+    link_pairs: &[(PdbAtomIdentity, PdbAtomIdentity)],
+    secondary_structures: &[SecondaryStructureSpan],
+) -> Structure {
+    let mut atoms = Vec::with_capacity(parsed_atoms.len());
+    let mut annotations = Vec::with_capacity(parsed_atoms.len());
+    let mut serial_to_index = HashMap::new();
+    let mut identity_to_index = HashMap::new();
+
+    for parsed in parsed_atoms {
+        let atom_index = atoms.len();
+        let identity = parsed.identity();
+        atoms.push(parsed.atom);
+        annotations.push(parsed.annotation);
+        serial_to_index.entry(parsed.serial).or_insert(atom_index);
+        identity_to_index.entry(identity).or_insert(atom_index);
+    }
+
+    let stored_cell = match inferred_cell {
         Some(cell) if is_dummy_cell(cell) => None,
-        other => other.clone(),
+        other => other.cloned(),
     };
 
     let bonds = resolve_bonds(
         &atoms,
-        inferred_cell.as_ref(),
+        inferred_cell,
         &serial_to_index,
         &identity_to_index,
-        &conect_pairs,
-        &link_pairs,
+        conect_pairs,
+        link_pairs,
     );
 
-    let title = if title_lines.is_empty() {
-        "PDB structure".to_string()
-    } else {
-        title_lines.join(" ")
-    };
-
-    let biopolymer = build_biopolymer(&annotations, secondary_structures);
+    let biopolymer = build_biopolymer(&annotations, secondary_structures.to_vec());
 
     let mut structure = match stored_cell {
         Some(cell) => Structure::with_cell_and_bonds(title, atoms, bonds, cell),
         None => Structure::with_bonds(title, atoms, bonds),
     };
     structure.biopolymer = biopolymer;
-    Ok(structure)
+    structure
 }
 
 pub fn to_pdb(structure: &Structure) -> Result<String> {
@@ -722,8 +811,65 @@ fn ordered_pair<T: Ord>(first: T, second: T) -> (T, T) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pdb, to_pdb};
+    use super::{parse_pdb, parse_pdb_document, to_pdb};
     use crate::domain::BondType;
+
+    #[test]
+    fn splits_nmr_models_into_separate_structures() {
+        let document = parse_pdb_document(
+            "\
+HEADER    ANTIMICROBIAL PROTEIN                   24-JUN-18   6A5J
+TITLE     SOLUTION NMR STRUCTURE OF SMALL PEPTIDE
+NUMMDL    2
+MODEL        1
+ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00  0.00           N
+ATOM      2  CA  GLY A   1       1.450   0.000   0.000  1.00  0.00           C
+ENDMDL
+MODEL        2
+ATOM      1  N   GLY A   1       0.100   0.000   0.000  1.00  0.00           N
+ATOM      2  CA  GLY A   1       1.550   0.000   0.000  1.00  0.00           C
+ENDMDL
+END
+",
+        )
+        .expect("valid multi-model pdb");
+
+        assert_eq!(document.pdb_id.as_deref(), Some("6A5J"));
+        assert_eq!(document.title, "SOLUTION NMR STRUCTURE OF SMALL PEPTIDE");
+        assert_eq!(document.models.len(), 2);
+        assert_eq!(document.models[0].atoms.len(), 2);
+        assert_eq!(document.models[1].atoms.len(), 2);
+        // The two conformers differ in coordinates.
+        assert!((document.models[0].atoms[0].position.x - 0.0).abs() < 0.0001);
+        assert!((document.models[1].atoms[0].position.x - 0.1).abs() < 0.0001);
+    }
+
+    #[test]
+    fn single_model_file_yields_one_structure() {
+        let document = parse_pdb_document(
+            "\
+TITLE     glycine
+ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00  0.00           N
+ATOM      2  CA  GLY A   1       1.450   0.000   0.000  1.00  0.00           C
+END
+",
+        )
+        .expect("valid pdb");
+
+        assert_eq!(document.models.len(), 1);
+        assert_eq!(document.pdb_id, None);
+        // parse_pdb returns that single model.
+        let structure = parse_pdb(
+            "\
+TITLE     glycine
+ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00  0.00           N
+ATOM      2  CA  GLY A   1       1.450   0.000   0.000  1.00  0.00           C
+END
+",
+        )
+        .expect("valid pdb");
+        assert_eq!(structure.atoms.len(), 2);
+    }
 
     #[test]
     fn parses_cryst1_atoms_and_conect_records() {
