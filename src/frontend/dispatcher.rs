@@ -1381,7 +1381,7 @@ fn resolve_md_topology_source(
 }
 
 fn resolve_md_engine_launch(
-    state: &AppState,
+    state: &mut AppState,
     engine: crate::frontend::state::MdEngineChoice,
 ) -> anyhow::Result<crate::engines::registry::EngineLaunch> {
     let registry = EngineRegistry::probe(&state.config.engine_overrides);
@@ -1395,13 +1395,55 @@ fn resolve_md_engine_launch(
             if let Some(launch) = registry.launch(EngineId::GROMACS).cloned() {
                 return Ok(launch);
             }
-            crate::engines::registry::detect_wsl_gromacs_launch().ok_or_else(|| {
+            let launch = crate::engines::registry::detect_wsl_gromacs_launch().ok_or_else(|| {
                 anyhow!(
                     "Could not find GROMACS. Install it and ensure `gmx` is on PATH, set up WSL with GROMACS installed, or configure its launch in Settings -> Engines."
                 )
-            })
+            })?;
+            // Persist the detected launch as an override so later builds reuse it
+            // directly instead of cold-starting WSL to re-probe every time (slow),
+            // and so it shows up in Settings -> Engines.
+            persist_detected_engine_launch(state, EngineId::GROMACS, launch.clone());
+            Ok(launch)
         }
     }
+}
+
+/// Cache an auto-detected engine launch into `engine_overrides` and save the
+/// config, so later builds reuse it without re-probing. No-op when an override
+/// already exists (set by the user or a prior detection) so a configured launch
+/// is never clobbered.
+fn persist_detected_engine_launch(
+    state: &mut AppState,
+    id: EngineId,
+    launch: crate::engines::registry::EngineLaunch,
+) {
+    if cache_engine_override(&mut state.config.engine_overrides, id, launch) {
+        // Keep the Settings panel draft in sync so it reflects the cached launch.
+        state.ui.settings.engine_drafts.remove(id.as_str());
+        persist_engine_config(state, "GROMACS launch detected and saved");
+        // Refresh the Settings registry so the engine's status indicator flips to
+        // available (green) immediately — the detection just succeeded, so the
+        // user shouldn't have to click "Detect" to see it. Cheap re-probe (reads
+        // the override; no `--version` WSL cold-start).
+        reprobe_engines(state);
+    }
+}
+
+/// Insert `launch` as the override for `id` only when none is configured.
+/// Returns `true` when newly inserted (the caller should then persist), `false`
+/// when an existing override was left untouched.
+fn cache_engine_override(
+    overrides: &mut std::collections::HashMap<String, crate::engines::registry::EngineLaunch>,
+    id: EngineId,
+    launch: crate::engines::registry::EngineLaunch,
+) -> bool {
+    let key = id.as_str().to_string();
+    if overrides.contains_key(&key) {
+        return false;
+    }
+    overrides.insert(key, launch);
+    true
 }
 
 fn build_md_stage_specs(
@@ -2122,5 +2164,43 @@ mod tests {
         super::dispatch(&mut state, AppAction::ConfirmSupercell, &ctx);
         assert!(state.ui.pending_supercell.is_some());
         assert!(state.structure().cell.is_none());
+    }
+
+    #[test]
+    fn caching_a_detected_launch_inserts_once_and_never_clobbers() {
+        use crate::engines::registry::{EngineId, EngineLaunch};
+        use std::collections::HashMap;
+
+        let mut overrides: HashMap<String, EngineLaunch> = HashMap::new();
+        let detected = EngineLaunch {
+            command_prefix: vec!["wsl.exe".to_string(), "-e".to_string()],
+            program: "/usr/local/gromacs/bin/gmx".to_string(),
+        };
+
+        // First detection caches the launch.
+        assert!(super::cache_engine_override(
+            &mut overrides,
+            EngineId::GROMACS,
+            detected.clone()
+        ));
+        assert_eq!(
+            overrides.get("gromacs").map(|l| l.program.as_str()),
+            Some("/usr/local/gromacs/bin/gmx")
+        );
+
+        // A later detection must not overwrite a launch already configured.
+        let other = EngineLaunch {
+            command_prefix: vec!["wsl.exe".to_string(), "-e".to_string()],
+            program: "gmx".to_string(),
+        };
+        assert!(!super::cache_engine_override(
+            &mut overrides,
+            EngineId::GROMACS,
+            other
+        ));
+        assert_eq!(
+            overrides.get("gromacs").map(|l| l.program.as_str()),
+            Some("/usr/local/gromacs/bin/gmx")
+        );
     }
 }
