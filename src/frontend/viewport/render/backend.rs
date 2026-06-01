@@ -84,6 +84,17 @@ impl RenderScene {
             })
             .sum()
     }
+
+    #[cfg(test)]
+    pub(crate) fn line_segments(&self) -> Vec<LineSegmentPrimitive> {
+        self.passes
+            .iter()
+            .flat_map(|pass| match pass {
+                RenderPass::Lines(lines) => lines.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
 }
 
 impl RenderPass {

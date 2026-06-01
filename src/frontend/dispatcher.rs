@@ -10,10 +10,10 @@ use crate::{
         housekeeping,
         project::{
             ProjectSession, WorkspaceSession, create_project, open_project as open_project_dir,
-            remember_opened_project, save_project as save_project_session,
+            remember_opened_project, save_project as save_project_session, save_project_ref,
         },
         runs::ensure_run_dir,
-        storage::ProjectSnapshot,
+        storage::{ProjectSnapshot, ProjectSnapshotRef},
         tasks::{TaskKind, TaskManager, TaskPanelKind, TaskStatus, task_controller_by_id},
     },
     domain::Structure,
@@ -40,7 +40,21 @@ use crate::{
 };
 
 pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
-    let persist_after = should_persist_after(&action);
+    // Project lifecycle actions persist themselves (open/create/close/save), so
+    // they opt out of change-detected autosave to avoid a redundant save.
+    let manages_own_persistence = matches!(
+        action,
+        AppAction::OpenProject
+            | AppAction::OpenRecentProject(_)
+            | AppAction::CreateProject
+            | AppAction::CloseProject
+            | AppAction::SaveProject
+    );
+    // Autosave only when the persisted entry state actually changes — an entry
+    // added, removed, or edited. View-only changes (camera, render styles,
+    // selection, active tab) don't move this fingerprint and are saved at exit
+    // instead, so navigating or restyling never schedules a save.
+    let fingerprint_before = (!manages_own_persistence).then(|| state.entries_fingerprint());
     match action {
         AppAction::CreateProject => create_project_action(state),
         AppAction::OpenProject => open_project_action(state),
@@ -106,23 +120,39 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::BrowseEngineProgram(id) => browse_engine_program(state, id),
         AppAction::RunConsoleCommand(command) => run_console_command(state, &command),
     }
-    if persist_after {
-        // Autosave skips re-serializing the (large) undo/redo history; it is
-        // persisted only at explicit checkpoints (save, open, close).
-        persist_project(state, false);
+    if let Some(before) = fingerprint_before
+        && state.entries_fingerprint() != before
+    {
+        // Entries changed (add/remove/edit). Coalesce rather than save
+        // synchronously: a burst of edits collapses into one save once the user
+        // pauses (see `flush_pending_autosave`). The flush still skips
+        // re-serializing the (large) undo/redo history; that is persisted only at
+        // explicit checkpoints (save, open, close, shutdown).
+        let now = ctx.input(|input| input.time);
+        state.request_autosave(now, AUTOSAVE_DEBOUNCE_SECS);
     }
-    let _ = ctx;
 }
 
-fn should_persist_after(action: &AppAction) -> bool {
-    !matches!(
-        action,
-        AppAction::OpenProject
-            | AppAction::OpenRecentProject(_)
-            | AppAction::CreateProject
-            | AppAction::CloseProject
-            | AppAction::SaveProject
-    )
+/// How long after an entry change a coalesced autosave waits before flushing.
+/// Long enough to absorb a burst of edits, short enough that an isolated change
+/// is saved promptly.
+const AUTOSAVE_DEBOUNCE_SECS: f64 = 0.5;
+
+/// Flush a coalesced autosave once its debounce window has elapsed. Called every
+/// frame from the app loop; a no-op when nothing is pending. While a save is
+/// still pending it requests a repaint at the deadline so the flush fires even
+/// if the user stops interacting.
+pub fn flush_pending_autosave(state: &mut AppState, ctx: &egui::Context) {
+    let Some(deadline) = state.autosave_deadline() else {
+        return;
+    };
+    let now = ctx.input(|input| input.time);
+    if now >= deadline {
+        // `persist_project` clears the deadline itself.
+        persist_project(state, false);
+    } else {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(deadline - now));
+    }
 }
 
 /// Clean-shutdown checkpoint for window close: persist the project (including
@@ -139,13 +169,25 @@ pub fn shutdown(state: &mut AppState) {
 }
 
 fn persist_project(state: &mut AppState, persist_history: bool) {
+    // Any pending coalesced autosave is subsumed by this save.
+    state.clear_autosave_deadline();
     let Some(project) = state.workspace.project() else {
         return;
     };
-    let Some(snapshot) = state.project_snapshot() else {
-        return;
+    // Save from borrowed references into the live state rather than cloning the
+    // whole workspace: in an entry-heavy project (e.g. a 20-model NMR ensemble)
+    // the clone dominated and made every interaction lag. `view` is the only
+    // small owned value the snapshot needs.
+    let view = state.project_view_settings();
+    let snapshot = ProjectSnapshotRef {
+        name: project.name.as_str(),
+        entries: &state.entries,
+        tasks: &state.tasks,
+        view: &view,
+        history: &state.history,
     };
-    if let Err(error) = save_project_session(project, &snapshot, persist_history) {
+    let result = save_project_ref(project, &snapshot, persist_history);
+    if let Err(error) = result {
         state.set_message(format!("Project save failed: {error}"));
     }
 }
@@ -197,6 +239,7 @@ fn poll_engine_job(state: &mut AppState, ctx: &egui::Context) {
     };
     let task_run_id = state.active_task_run;
     let mut before = state.optimization_origin.take();
+    let fingerprint_before = state.entries_fingerprint();
 
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
         running
@@ -228,8 +271,7 @@ fn poll_engine_job(state: &mut AppState, ctx: &egui::Context) {
             }
             EngineWorkerMessage::Finished(success) => {
                 let save_path = structure_io::default_structure_save_path(&success.structure, None);
-                let entry_id = state.entries.add_entry(success.structure, None, save_path);
-                activate_entry(state, entry_id);
+                let entry_id = add_and_show_entry(state, success.structure, None, save_path);
                 if let Some(task_run_id) = task_run_id {
                     record_task_result_entry(state, task_run_id, entry_id);
                 }
@@ -259,6 +301,11 @@ fn poll_engine_job(state: &mut AppState, ctx: &egui::Context) {
         } else {
             before.take();
         }
+        // A completed build adds/edits an entry; persist that result (debounced).
+        if state.entries_fingerprint() != fingerprint_before {
+            let now = ctx.input(|input| input.time);
+            state.request_autosave(now, AUTOSAVE_DEBOUNCE_SECS);
+        }
         ctx.request_repaint();
     }
 }
@@ -268,6 +315,7 @@ fn poll_optimization_job(state: &mut AppState, ctx: &egui::Context) {
         return;
     };
     let mut before = state.optimization_origin.take();
+    let fingerprint_before = state.entries_fingerprint();
 
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
         running
@@ -334,6 +382,11 @@ fn poll_optimization_job(state: &mut AppState, ctx: &egui::Context) {
             }
         } else if let Some(before) = before.take() {
             state.restore_edit_snapshot(before);
+        }
+        // Persist the finished (or reverted) geometry once, not per step.
+        if state.entries_fingerprint() != fingerprint_before {
+            let now = ctx.input(|input| input.time);
+            state.request_autosave(now, AUTOSAVE_DEBOUNCE_SECS);
         }
         ctx.request_repaint();
     }
@@ -781,13 +834,40 @@ fn close_active_task_panel(state: &mut AppState) {
 }
 
 fn new_empty_entry(state: &mut AppState) {
-    state.save_viewport_for_active_entry();
     let structure = Structure::empty();
     let save_path = structure_io::default_structure_save_path(&structure, None);
-    let entry_id = state.entries.add_entry(structure, None, save_path);
-    state.ui.entry_list.selected_entry_id = Some(entry_id);
-    load_active_entry(state);
+    let entry_id = add_and_show_entry(state, structure, None, save_path);
     state.set_message(format!("Created empty entry #{entry_id}"));
+}
+
+/// Insert a freshly produced structure as a new entry and switch to it, running
+/// the full app-level load (first-load render defaults, transient reset, camera
+/// recenter). Returns the new entry id.
+///
+/// `EntryStore::add_entry` already marks the entry active in the store, so this
+/// must NOT route through [`activate_entry`]: its "already active" early-return
+/// would skip [`load_active_entry`], leaving the new structure rendered with the
+/// previous entry's styles — which is why a freshly built MD system showed its
+/// bulk solvent as ball-and-stick instead of the wireframe default. Mirrors the
+/// save → add → load sequence of [`new_empty_entry`].
+fn add_and_show_entry(
+    state: &mut AppState,
+    structure: Structure,
+    source_path: Option<PathBuf>,
+    save_path: PathBuf,
+) -> u64 {
+    state.save_viewport_for_active_entry();
+    let entry_id = state.entries.add_entry(structure, source_path, save_path);
+    state.ui.entry_list.selected_entry_id = Some(entry_id);
+    // `load_active_entry` resets transient state, which includes the active task
+    // run. When a task (e.g. an MD system build) produces and shows its result
+    // entry, that task context must survive so the caller can still mark the run
+    // complete and record this entry as its result — otherwise the run is never
+    // marked completed and lookups like the GROMACS topology for the entry fail.
+    let active_task_run = state.active_task_run;
+    load_active_entry(state);
+    state.active_task_run = active_task_run;
+    entry_id
 }
 
 fn activate_entry(state: &mut AppState, entry_id: u64) {
@@ -1038,10 +1118,7 @@ fn accept_framework_task(state: &mut AppState) {
             if let Some(before) = state.builder_origin.take() {
                 state.restore_edit_snapshot(before);
             }
-            let entry_id = state
-                .entries
-                .add_entry(built.structure, None, built.save_path);
-            activate_entry(state, entry_id);
+            add_and_show_entry(state, built.structure, None, built.save_path);
             state.set_message(format!("Reticular structure built; {}", built.analysis));
             complete_active_task(
                 state,
@@ -1221,8 +1298,7 @@ fn prepare_protein(
     }
 
     let save_path = structure_io::default_structure_save_path(&prepared, None);
-    let entry_id = state.entries.add_entry(prepared, None, save_path);
-    activate_entry(state, entry_id);
+    let entry_id = add_and_show_entry(state, prepared, None, save_path);
     if let Some(task_run_id) = state.active_task_run {
         record_task_result_entry(state, task_run_id, entry_id);
     }
@@ -1752,8 +1828,7 @@ fn build_md_system_builtin(
         None => (boxed, String::new()),
     };
     let save_path = structure_io::default_structure_save_path(&final_structure, None);
-    let entry_id = state.entries.add_entry(final_structure, None, save_path);
-    activate_entry(state, entry_id);
+    let entry_id = add_and_show_entry(state, final_structure, None, save_path);
     if let Some(task_run_id) = state.active_task_run {
         record_task_result_entry(state, task_run_id, entry_id);
     }
@@ -1996,6 +2071,49 @@ mod tests {
         );
         assert_eq!(state.save_path(), &PathBuf::from(r"C:\tmp\edited.cif"));
         assert!(state.ui.selection.is_empty());
+    }
+
+    #[test]
+    fn entry_changes_move_the_fingerprint_but_view_changes_do_not() {
+        let ctx = Context::default();
+        let mut state = scratch_state(test_structure("mol"));
+        let fingerprint = state.entries_fingerprint();
+
+        // View-only interactions (selection, restyle) must not change the
+        // fingerprint, so they never schedule a save.
+        super::dispatch(&mut state, AppAction::SelectAll, &ctx);
+        assert_eq!(
+            state.entries_fingerprint(),
+            fingerprint,
+            "selection is view-only and must not move the fingerprint"
+        );
+        super::dispatch(&mut state, AppAction::ResetSelectionStyle, &ctx);
+        assert_eq!(
+            state.entries_fingerprint(),
+            fingerprint,
+            "restyling is view-only and must not move the fingerprint"
+        );
+
+        // Adding an entry is a persisted change and must move the fingerprint.
+        super::dispatch(&mut state, AppAction::NewEmptyEntry, &ctx);
+        assert_ne!(
+            state.entries_fingerprint(),
+            fingerprint,
+            "adding an entry must move the fingerprint"
+        );
+    }
+
+    #[test]
+    fn autosave_deadline_is_scheduled_and_cleared() {
+        let mut state = scratch_state(test_structure("mol"));
+        assert_eq!(state.autosave_deadline(), None);
+        state.request_autosave(10.0, 0.5);
+        assert_eq!(state.autosave_deadline(), Some(10.5));
+        // A later request pushes the deadline back (debounce coalescing).
+        state.request_autosave(10.4, 0.5);
+        assert_eq!(state.autosave_deadline(), Some(10.9));
+        state.clear_autosave_deadline();
+        assert_eq!(state.autosave_deadline(), None);
     }
 
     #[test]

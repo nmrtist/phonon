@@ -7,7 +7,8 @@ use crate::backend::{
         AppConfig, RecentProject, remember_recent_project, save_config, save_recent_projects,
     },
     storage::{
-        ProjectSnapshot, initialize_project_databases, load_project_snapshot, save_project_snapshot,
+        ProjectSnapshot, ProjectSnapshotRef, initialize_project_databases, load_project_snapshot,
+        save_project_snapshot, save_project_snapshot_ref,
     },
 };
 
@@ -107,6 +108,19 @@ pub fn save_project(
 ) -> Result<()> {
     save_project_snapshot(session, snapshot, persist_history)?;
     // Keep the manifest's recorded versions in step with what wrote the DBs.
+    crate::backend::housekeeping::write_manifest(session)?;
+    Ok(())
+}
+
+/// Borrowed-input variant of [`save_project`] for the autosave hot path: saves
+/// straight from references into the live application state without cloning the
+/// workspace.
+pub fn save_project_ref(
+    session: &ProjectSession,
+    snapshot: &ProjectSnapshotRef<'_>,
+    persist_history: bool,
+) -> Result<()> {
+    save_project_snapshot_ref(session, snapshot, persist_history)?;
     crate::backend::housekeeping::write_manifest(session)?;
     Ok(())
 }

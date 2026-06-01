@@ -12,8 +12,10 @@ use crate::{
     domain::Structure,
     frontend::{
         AtomSelection, BuildingBlockEditor, CommandConsoleState, ReticularBuilderPanel,
-        StructureEditor, ViewCamera, ViewportVisualState, jobs::JobManager,
-        viewport::ViewportCache, viewport_defaults::apply_entry_render_defaults,
+        StructureEditor, ViewCamera, ViewportVisualState,
+        jobs::JobManager,
+        viewport::ViewportCache,
+        viewport_defaults::{apply_entry_render_defaults, apply_solvent_render_default},
     },
     io::structure_io,
 };
@@ -126,7 +128,8 @@ pub enum AtomStyle {
     /// A small flat disc per atom (PyMOL `nonbonded` / dots). Cheapest; ideal
     /// for bulk solvent and ions.
     Point,
-    /// Bonds as thin lines, atoms as points (PyMOL `lines` / ChimeraX `wire`).
+    /// Bonds as thin lines only; atoms carry no marker (PyMOL `lines` /
+    /// ChimeraX `wire`). Ideal for bulk solvent — pure lines, no dots.
     Wireframe,
     /// Bonds as cylinders, no atom spheres (VMD Licorice / PyMOL `sticks`).
     Stick,
@@ -197,14 +200,17 @@ impl AtomStyle {
             Self::BallAndStick => Some(0.78),
             // A small joint so isolated atoms (lone ions / water O) stay visible.
             Self::Stick => Some(0.30),
-            // Wireframe/Point are flat discs; Cartoon/Hidden draw no atom here.
+            // Point is a flat disc; Wireframe draws only its line bonds (no atom
+            // marker); Cartoon/Hidden draw no atom here.
             Self::Wireframe | Self::Point | Self::Cartoon | Self::Hidden => None,
         }
     }
 
-    /// Whether visible atoms in this style are drawn as a flat point disc.
+    /// Whether visible atoms in this style are drawn as a flat point disc. Only
+    /// `Point` (Dots) draws a disc; `Wireframe` shows bonds as lines with no
+    /// per-atom marker.
     pub fn draws_point(self) -> bool {
-        matches!(self, Self::Wireframe | Self::Point)
+        matches!(self, Self::Point)
     }
 
     /// True for styles whose per-atom geometry is heavy enough that very large
@@ -721,6 +727,11 @@ pub struct AppState {
     workspace_structure: Structure,
     workspace_save_path: PathBuf,
     last_logged_message: String,
+    /// egui time (seconds) at which a coalesced autosave should flush, or `None`
+    /// when no project change is pending. Set by the dispatcher after a
+    /// persist-worthy action and drained on the UI thread once the debounce
+    /// window elapses, so rapid interactions don't each pay a full project save.
+    autosave_deadline: Option<f64>,
 }
 
 impl AppState {
@@ -772,6 +783,7 @@ impl AppState {
             workspace_structure: structure,
             workspace_save_path: save_path,
             last_logged_message: message,
+            autosave_deadline: None,
         };
         if let Some(snapshot) = project_snapshot.as_ref() {
             state.ui.project_viewport = snapshot.view.viewport.clone();
@@ -863,6 +875,14 @@ impl AppState {
         };
         if let Some(viewport) = self.ui.entry_viewports.get(&entry_id).cloned() {
             self.ui.viewport = viewport;
+            // Migrate entries saved before the bulk-solvent wireframe default: if
+            // no per-atom style was ever stored for this entry, apply the default
+            // now. A non-empty map means the user (or a newer build) already
+            // configured atoms, so we leave their choices untouched.
+            if self.ui.viewport.atom_styles.is_empty() {
+                let structure = self.structure().clone();
+                apply_solvent_render_default(&mut self.ui.viewport, &structure);
+            }
         } else {
             self.ui.viewport = self.ui.project_viewport.clone();
             self.apply_render_defaults_for_active_entry();
@@ -924,6 +944,44 @@ impl AppState {
             Some(project) => project.root.join(subdir),
             None => std::path::PathBuf::from(subdir),
         }
+    }
+
+    /// A cheap hash of the persisted entry/group state — entry set, per-entry
+    /// revision (bumped on every edit), names, and grouping. Deliberately
+    /// excludes transient/view state (active tab, selection, camera, render
+    /// styles): the autosave policy only saves when entries are added, removed,
+    /// or edited, leaving view-only changes to be persisted at exit. Touches no
+    /// geometry, so it is fast even for entry-heavy projects.
+    pub fn entries_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.entries.records.len().hash(&mut hasher);
+        for record in &self.entries.records {
+            record.id.hash(&mut hasher);
+            record.revision.hash(&mut hasher);
+            record.name.hash(&mut hasher);
+            record.group_id.hash(&mut hasher);
+        }
+        for group in &self.entries.groups {
+            group.id.hash(&mut hasher);
+            group.name.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Schedule a coalesced autosave to flush `delay_seconds` after `now_seconds`
+    /// (both egui clock seconds). Repeated calls push the deadline back so a burst
+    /// of actions collapses into a single save once the user pauses.
+    pub fn request_autosave(&mut self, now_seconds: f64, delay_seconds: f64) {
+        self.autosave_deadline = Some(now_seconds + delay_seconds);
+    }
+
+    pub fn autosave_deadline(&self) -> Option<f64> {
+        self.autosave_deadline
+    }
+
+    pub fn clear_autosave_deadline(&mut self) {
+        self.autosave_deadline = None;
     }
 
     pub fn project_snapshot(&self) -> Option<ProjectSnapshot> {

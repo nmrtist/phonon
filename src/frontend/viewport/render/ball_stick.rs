@@ -113,14 +113,14 @@ pub(crate) fn build_ball_and_stick_scene(
                 visual_state,
             );
         } else if style_a.draws_line_bonds() || style_b.draws_line_bonds() {
-            let start = viewport.project(bond.start);
-            let end = viewport.project(bond.end);
-            lines.push(LineSegmentPrimitive {
-                start: start.pos,
-                end: end.pos,
-                color: atom_render_color_with_settings(structure, bond.a, selection, visual_state),
-                width: 1.2,
-            });
+            push_split_bond_line(
+                &mut lines,
+                viewport,
+                bond,
+                structure,
+                selection,
+                visual_state,
+            );
         }
     }
 
@@ -182,14 +182,14 @@ fn build_point_cloud_scene(
         if !bond_visible(structure, visual_state, bond) {
             continue;
         }
-        let start = viewport.project(bond.start);
-        let end = viewport.project(bond.end);
-        lines.push(LineSegmentPrimitive {
-            start: start.pos,
-            end: end.pos,
-            color: atom_render_color_with_settings(structure, bond.a, selection, visual_state),
-            width: 1.2,
-        });
+        push_split_bond_line(
+            &mut lines,
+            viewport,
+            bond,
+            structure,
+            selection,
+            visual_state,
+        );
     }
 
     for atom_projection in visible_atoms {
@@ -216,6 +216,45 @@ fn build_point_cloud_scene(
     scene.push_lines(lines);
     scene.push_opaque_meshes(opaque_triangles);
     scene.sorted()
+}
+
+/// Push a wireframe/point-cloud bond as two half-segments split at its midpoint,
+/// each half colored by its nearer atom.
+/// The nearer atom is resolved from the segment's actual endpoint so periodic
+/// bond halves (whose `start` may be either atom) stay correctly colored.
+fn push_split_bond_line(
+    lines: &mut Vec<LineSegmentPrimitive>,
+    viewport: &Projector,
+    bond: &RenderedBondSegment,
+    structure: &Structure,
+    selection: &AtomSelection,
+    visual_state: &ViewportVisualState,
+) {
+    let start = viewport.project(bond.start);
+    let end = viewport.project(bond.end);
+    let mid = viewport.project(Point3::from((bond.start.coords + bond.end.coords) * 0.5));
+    let color_a = atom_render_color_with_settings(structure, bond.a, selection, visual_state);
+    let color_b = atom_render_color_with_settings(structure, bond.b, selection, visual_state);
+    // Color the half at `start` by whichever atom that end sits on.
+    let a_pos = structure.atoms[bond.a].position;
+    let (start_color, end_color) =
+        if (bond.start - a_pos).norm_squared() <= (bond.end - a_pos).norm_squared() {
+            (color_a, color_b)
+        } else {
+            (color_b, color_a)
+        };
+    lines.push(LineSegmentPrimitive {
+        start: start.pos,
+        end: mid.pos,
+        color: start_color,
+        width: 1.2,
+    });
+    lines.push(LineSegmentPrimitive {
+        start: mid.pos,
+        end: end.pos,
+        color: end_color,
+        width: 1.2,
+    });
 }
 
 /// Screen-space radius (pixels) of a point disc, scaled by the atom's
@@ -808,5 +847,47 @@ mod tests {
         // Re-applying the resolved category default removes the overrides.
         visual.apply_atom_styles(items, AtomStyle::BallAndStick);
         assert!(visual.atom_styles.is_empty());
+    }
+
+    #[test]
+    fn wireframe_bond_splits_into_two_atom_colors() {
+        use crate::domain::{Bond, BondType};
+        // An O–H bond drawn as wireframe must split into two half-segments — one
+        // O-colored, one H-colored — so H–O–H reads as a colored V, not a single
+        // line that looks like O–O–O.
+        let structure = Structure::with_bonds(
+            "oh",
+            vec![
+                Atom {
+                    element: "O".to_string(),
+                    position: Point3::new(0.0, 0.0, 0.0),
+                    charge: 0.0,
+                },
+                Atom {
+                    element: "H".to_string(),
+                    position: Point3::new(1.0, 0.0, 0.0),
+                    charge: 0.0,
+                },
+            ],
+            vec![Bond::with_type(0, 1, BondType::Single)],
+        );
+        let viewport = test_projector();
+        let geometry = build_viewport_geometry(&structure, &viewport);
+        let mut visual = ViewportVisualState::default();
+        visual.atom_styles.insert(0, AtomStyle::Wireframe);
+        visual.atom_styles.insert(1, AtomStyle::Wireframe);
+        let scene = build_ball_and_stick_scene(
+            &structure,
+            &geometry,
+            &viewport,
+            &AtomSelection::default(),
+            &visual,
+        );
+        let lines = scene.line_segments();
+        assert_eq!(lines.len(), 2, "the bond is split into two half-segments");
+        assert_ne!(
+            lines[0].color, lines[1].color,
+            "the two halves carry the O and H colors"
+        );
     }
 }

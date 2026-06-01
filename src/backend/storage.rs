@@ -31,6 +31,30 @@ pub struct ProjectSnapshot {
     pub history: History,
 }
 
+/// Borrowed view of the data a save reads. Saving only needs read access, so the
+/// hot autosave path builds one of these straight from the live `AppState`
+/// instead of deep-cloning the whole workspace (every loaded entry's geometry +
+/// undo history) into an owned [`ProjectSnapshot`] on each action.
+pub struct ProjectSnapshotRef<'a> {
+    pub name: &'a str,
+    pub entries: &'a EntryStore,
+    pub tasks: &'a TaskManager,
+    pub view: &'a ProjectViewSettings,
+    pub history: &'a History,
+}
+
+impl ProjectSnapshot {
+    pub fn borrowed(&self) -> ProjectSnapshotRef<'_> {
+        ProjectSnapshotRef {
+            name: self.name.as_str(),
+            entries: &self.entries,
+            tasks: &self.tasks,
+            view: &self.view,
+            history: &self.history,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProjectViewSettings {
     pub viewport: ViewportVisualState,
@@ -103,6 +127,17 @@ pub fn load_structure_for_compound(compounds_db: &Path, compound_id: i64) -> Res
 pub fn save_project_snapshot(
     session: &ProjectSession,
     snapshot: &ProjectSnapshot,
+    persist_history: bool,
+) -> Result<()> {
+    save_project_snapshot_ref(session, &snapshot.borrowed(), persist_history)
+}
+
+/// Borrowed-input variant of [`save_project_snapshot`]. The autosave path calls
+/// this directly with references into the live `AppState`, avoiding an owned
+/// clone of the workspace on every save.
+pub fn save_project_snapshot_ref(
+    session: &ProjectSession,
+    snapshot: &ProjectSnapshotRef<'_>,
     persist_history: bool,
 ) -> Result<()> {
     let mut project_db = Connection::open(&session.project_db)
@@ -214,10 +249,10 @@ pub fn save_project_snapshot(
             ],
         )?;
     }
-    save_project_view_settings(&project_tx, &snapshot.view)?;
+    save_project_view_settings(&project_tx, snapshot.view)?;
 
     if persist_history {
-        save_history(&project_tx, &snapshot.history)?;
+        save_history(&project_tx, snapshot.history)?;
     }
 
     compound_tx.commit()?;

@@ -183,6 +183,7 @@ impl eframe::App for PhononApp {
         for action in actions {
             dispatcher::dispatch(&mut self.state, action, &ctx);
         }
+        dispatcher::flush_pending_autosave(&mut self.state, &ctx);
         self.state.record_message_change();
     }
 }
