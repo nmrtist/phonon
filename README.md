@@ -28,6 +28,17 @@ cargo build --release
 
 The built binary is written to `target/release/`.
 
+## External Dependencies
+
+### GROMACS (required for molecular dynamics)
+
+Molecular dynamics simulations require [GROMACS](https://www.gromacs.org/) to be installed separately.
+GPU acceleration is **strongly recommended** — running MD on CPU alone is technically possible but prohibitively slow for any non-trivial system.
+
+- **Windows:** Install GROMACS inside [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`sudo apt install gromacs`). For GPU support, compile from source with CUDA inside WSL.
+- **Linux:** `sudo apt install gromacs` for a quick start; compile from source with CUDA/ROCm for GPU acceleration.
+- **macOS:** `brew install gromacs`. Note that GPU acceleration is not supported on Apple hardware, so MD performance will be limited.
+
 ## License
 
 [Apache-2.0](LICENSE)
