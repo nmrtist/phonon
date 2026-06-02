@@ -80,6 +80,16 @@ pub enum AppAction {
     ConfirmMdSystem,
     CancelMdSystemPrompt,
     PickMdTopologyOverride,
+    /// Select a custom force field from the library by name (or `None` for
+    /// built-in only) for the MD System Builder; loads and caches its text.
+    SelectCustomForceField(Option<String>),
+    /// Save the MD System Builder's draft custom force field to the library under
+    /// its draft name, then select it.
+    SaveCustomForceField,
+    /// Delete the named custom force field from the library.
+    DeleteCustomForceField(String),
+    /// Open a file picker and load a `.itp` into the draft custom force field.
+    ImportCustomForceFieldFile,
     StartMdRun,
     CancelMdRunPrompt,
     RefreshEngineRegistry,

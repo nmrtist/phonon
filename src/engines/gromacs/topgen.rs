@@ -34,21 +34,33 @@ pub fn render_top(topology: &MdTopology) -> String {
         None => top.push_str("1         2          no         1.0      1.0\n\n"),
     }
 
-    top.push_str("[ atomtypes ]\n");
-    top.push_str("; name  at.num  mass        charge  ptype  sigma      epsilon\n");
-    for s in &topology.species {
-        top.push_str(&format!(
-            "  {:<4}  {:<6}  {:<10}  {:<6}  {:<5}  {:<9}  {}\n",
-            s.element,
-            s.atomic_number,
-            s.mass_u,
-            format!("{:.3}", s.charge),
-            "A",
-            s.sigma_angstrom * ANGSTROM_TO_NM,
-            s.epsilon_kj_mol,
-        ));
+    // A user-supplied custom force field (atom/bonded types), inlined after
+    // [defaults] so its [atomtypes] merge with the built-in ones below and are
+    // visible to the molecule types — and so the .top stays self-contained.
+    if let Some(ff) = &topology.inline_force_field {
+        top.push_str(ff.trim_end());
+        top.push_str("\n\n");
     }
-    top.push('\n');
+
+    // Built-in atom types. Omitted entirely when every type is user-supplied (an
+    // empty directive is pointless), since the `#include` above provides them.
+    if !topology.species.is_empty() {
+        top.push_str("[ atomtypes ]\n");
+        top.push_str("; name  at.num  mass        charge  ptype  sigma      epsilon\n");
+        for s in &topology.species {
+            top.push_str(&format!(
+                "  {:<4}  {:<6}  {:<10}  {:<6}  {:<5}  {:<9}  {}\n",
+                s.element,
+                s.atomic_number,
+                s.mass_u,
+                format!("{:.3}", s.charge),
+                "A",
+                s.sigma_angstrom * ANGSTROM_TO_NM,
+                s.epsilon_kj_mol,
+            ));
+        }
+        top.push('\n');
+    }
 
     // Force-field parameter directives (only present for bonded systems); grompp
     // matches the index-only bonded terms below against these.
@@ -62,15 +74,19 @@ pub fn render_top(topology: &MdTopology) -> String {
         top.push_str("[ atoms ]\n");
         top.push_str("; nr  type  resnr  residue  atom  cgnr  charge  mass\n");
         for (i, atom) in mol.atoms.iter().enumerate() {
+            // Mass comes from the matching built-in species. For a type defined
+            // only in a user-supplied `[atomtypes]` (no species here), omit the
+            // per-atom mass column so grompp takes the mass from that atom type
+            // rather than seeing an explicit zero (which it rejects).
             let mass = topology
                 .species
                 .iter()
                 .find(|s| s.element == atom.species)
-                .map_or(0.0, |s| s.mass_u);
+                .map(|s| s.mass_u);
             let resnr = atom.residue_number.unwrap_or(1);
             let residue = atom.residue_name.as_deref().unwrap_or(&mol.name);
-            top.push_str(&format!(
-                "  {:<3}  {:<6}  {:<4}  {:<6}  {:<4}  {:<3}  {:>7.4}  {}\n",
+            let mut line = format!(
+                "  {:<3}  {:<6}  {:<4}  {:<6}  {:<4}  {:<3}  {:>7.4}",
                 i + 1,
                 atom.species,
                 resnr,
@@ -78,12 +94,47 @@ pub fn render_top(topology: &MdTopology) -> String {
                 atom.atom_name,
                 i + 1,
                 atom.charge,
-                mass,
-            ));
+            );
+            if let Some(mass) = mass {
+                line.push_str(&format!("  {mass}"));
+            }
+            line.push('\n');
+            top.push_str(&line);
         }
         top.push('\n');
 
         render_bonded_sections(&mut top, mol);
+
+        // Explicit nonbonded exclusions for a bond-free rigid framework (grompp
+        // has no bonds to derive them from). Each row lists an atom and the
+        // partners it is excluded from.
+        if !mol.exclusions.is_empty() {
+            // GROMACS requires `[exclusions]` to be preceded by a `[bonds]`,
+            // `[constraints]` or `[settles]` directive within the molecule type.
+            // A bond-free rigid framework has none, so emit an empty `[bonds]`
+            // header to satisfy the directive-order rule.
+            if mol.bonds.is_empty() {
+                top.push_str("[ bonds ]\n\n");
+            }
+            let mut header_written = false;
+            for (i, excluded) in mol.exclusions.iter().enumerate() {
+                if excluded.is_empty() {
+                    continue;
+                }
+                if !header_written {
+                    top.push_str("[ exclusions ]\n");
+                    header_written = true;
+                }
+                top.push_str(&format!("  {}", i + 1));
+                for partner in excluded {
+                    top.push_str(&format!("  {partner}"));
+                }
+                top.push('\n');
+            }
+            if header_written {
+                top.push('\n');
+            }
+        }
 
         // Rigid three-site water: a SETTLE constraint plus full OW–HW exclusions.
         if let Some(settle) = &mol.settle {
@@ -222,6 +273,55 @@ mod tests {
         assert!(top.contains("[ molecules ]"));
         // Eight contiguous argon atoms collapse to a single run.
         assert!(top.contains("AR      8"));
+    }
+
+    fn carbon_ring() -> Structure {
+        use crate::domain::{Bond, BondType};
+        let atoms = (0..6)
+            .map(|i| Atom {
+                element: "C".to_string(),
+                position: Point3::new(i as f32, 0.0, 0.0),
+                charge: 0.0,
+            })
+            .collect();
+        let bonds = (0..6)
+            .map(|i| Bond::with_type(i, (i + 1) % 6, BondType::Single))
+            .collect();
+        Structure::with_bonds("ring", atoms, bonds)
+    }
+
+    #[test]
+    fn rigid_framework_renders_an_exclusions_block() {
+        use crate::workflows::molecular_dynamics::FrameworkMode;
+        let topo = MdTopology::framework(&carbon_ring(), FrameworkMode::Rigid).unwrap();
+        let top = render_top(&topo);
+        assert!(top.contains("[ exclusions ]"), "{top}");
+        // Aromatic carbon type name, not the bare element symbol.
+        assert!(top.contains("CJ"));
+        // No bonded *parameter* directives in the rigid (frozen) model.
+        assert!(!top.contains("[ bondtypes ]"));
+        // GROMACS requires a [bonds]/[constraints]/[settles] directive before
+        // [exclusions]; the renderer emits an empty [bonds] to satisfy that.
+        let bonds_at = top.find("[ bonds ]").expect("empty [bonds] emitted");
+        let excl_at = top.find("[ exclusions ]").unwrap();
+        assert!(bonds_at < excl_at, "[bonds] must precede [exclusions]");
+    }
+
+    #[test]
+    fn flexible_framework_renders_bonded_directives() {
+        use crate::workflows::molecular_dynamics::FrameworkMode;
+        let topo = MdTopology::framework(&carbon_ring(), FrameworkMode::Flexible).unwrap();
+        let top = render_top(&topo);
+        // OPLS combination rule 3 and the carbon bonded parameter table.
+        assert!(top.contains("1         3"));
+        assert!(top.contains("[ bondtypes ]"));
+        assert!(top.contains("CJ CJ"));
+        assert!(top.contains("[ dihedraltypes ]"));
+        assert!(top.contains("X CJ CJ X"));
+        // Index-only bonded sections on the molecule itself.
+        assert!(top.contains("[ bonds ]"));
+        assert!(top.contains("[ angles ]"));
+        assert!(top.contains("[ dihedrals ]"));
     }
 
     #[test]

@@ -22,6 +22,8 @@
 //! has an engine generate every file it requires from that information.
 
 pub mod catalog;
+pub mod framework;
+pub mod materials;
 pub mod protocol;
 pub mod solvation;
 pub mod system;
@@ -30,6 +32,13 @@ pub mod topology;
 pub use catalog::{
     DEFAULT_FORCE_FIELD, FORCE_FIELDS, ForceFieldEntry, SystemContent, classify, force_field_title,
     recommended_force_field,
+};
+pub use framework::FrameworkMode;
+pub use materials::{
+    Coverage, CustomTypes, ElementParameterization, FlexibleForceField, MaterialAtomType,
+    SolventDefinitions, atom_type, flexible_force_field, framework_coverage, is_framework,
+    is_framework_shape, is_framework_with_custom, parameterize_element, solvent_definitions,
+    supports_flexible, unparameterized_elements, user_provided_elements,
 };
 
 pub use protocol::{
@@ -40,8 +49,9 @@ pub use solvation::{
     SolvationEstimate, SolvationOptions, SolvationReport, WaterModel, estimate, solvate,
 };
 pub use system::{
-    BoxShape, BoxSizing, DEFAULT_PADDING_ANGSTROM, MdSystemConfig, MdSystemPreview, MdSystemReport,
-    build_md_system, preview, preview_edges,
+    BoxShape, BoxSizing, DEFAULT_CUTOFF_NM, DEFAULT_PADDING_ANGSTROM, MdSystemConfig,
+    MdSystemPreview, MdSystemReport, build_md_system, cell_inradius_angstrom,
+    ensure_periodic_cutoff_fits, preview, preview_edges, set_slab_c_axis,
 };
 pub use topology::{
     BondedParam, BondedTerm, MdTopology, MoleculeAtom, MoleculeRun, MoleculeType, SettleGeometry,

@@ -317,7 +317,7 @@ fn plan_solvation(solute: &Structure, options: &SolvationOptions) -> Result<Solv
                 ];
                 let r = vectors[0] * frac[0] + vectors[1] * frac[1] + vectors[2] * frac[2];
                 let center = Point3::from(r);
-                if !overlaps_solute(&center, solute, clearance_sq) {
+                if !overlaps_solute(&center, solute, cell, clearance_sq) {
                     sites.push(center);
                 }
             }
@@ -373,12 +373,29 @@ enum IonKind {
 
 /// Whether a candidate water-oxygen site sits within contact distance of any
 /// solute atom (a single generic clearance is used, as no per-atom radii exist
-/// in this layer).
-fn overlaps_solute(center: &Point3<f32>, solute: &Structure, clearance_sq: f32) -> bool {
+/// in this layer). The distance is the minimum image under the cell's
+/// periodicity, so a site near a cell boundary is tested against the nearest
+/// periodic image of each solute atom — essential for a tight periodic slab (a
+/// nanosheet), whose in-plane lattice is only a few angstroms wide.
+fn overlaps_solute(
+    center: &Point3<f32>,
+    solute: &Structure,
+    cell: &crate::domain::UnitCell,
+    clearance_sq: f32,
+) -> bool {
     solute
         .atoms
         .iter()
-        .any(|atom| (center - atom.position).norm_squared() < clearance_sq)
+        .any(|atom| min_image_delta(cell, center - atom.position).norm_squared() < clearance_sq)
+}
+
+/// The minimum-image displacement of `delta` under the cell's periodicity: each
+/// fractional component is wrapped into [-0.5, 0.5] before converting back to a
+/// Cartesian vector.
+fn min_image_delta(cell: &crate::domain::UnitCell, delta: Vector3<f32>) -> Vector3<f32> {
+    let frac = cell.cartesian_to_fractional(Point3::from(delta));
+    let wrap = |f: f32| f - f.round();
+    cell.vectors[0] * wrap(frac.x) + cell.vectors[1] * wrap(frac.y) + cell.vectors[2] * wrap(frac.z)
 }
 
 /// Element label for a placed ion, from its (force-field) residue name. Maps the
@@ -486,6 +503,44 @@ mod tests {
         let raw = Structure::new("argon", atoms);
         let config = MdSystemConfig::with_absolute_edges([edge_a; 3], BoxShape::Cubic);
         build_md_system(&raw, &config).unwrap().0
+    }
+
+    #[test]
+    fn min_image_delta_wraps_across_a_cell_boundary() {
+        use crate::domain::UnitCell;
+        let cell = UnitCell::from_vectors([
+            Vector3::new(8.0, 0.0, 0.0),
+            Vector3::new(0.0, 8.0, 0.0),
+            Vector3::new(0.0, 0.0, 8.0),
+        ]);
+        // A near-full-cell displacement is small under the minimum image.
+        let wrapped = min_image_delta(&cell, Vector3::new(7.9, 0.0, 0.0));
+        assert!(wrapped.norm() < 0.2, "did not wrap: {}", wrapped.norm());
+    }
+
+    #[test]
+    fn clash_test_sees_a_solute_atom_across_the_periodic_boundary() {
+        use crate::domain::UnitCell;
+        let cell = UnitCell::from_vectors([
+            Vector3::new(8.0, 0.0, 0.0),
+            Vector3::new(0.0, 8.0, 0.0),
+            Vector3::new(0.0, 0.0, 8.0),
+        ]);
+        // Solute atom hugs the x=0 face; a candidate site hugs the x=L face. In
+        // raw Cartesian they are ~7.8 A apart (no clash), but their minimum-image
+        // separation is ~0.4 A, which must register as an overlap.
+        let solute = Structure::with_cell(
+            "edge",
+            vec![Atom {
+                element: "C".into(),
+                position: Point3::new(0.1, 4.0, 4.0),
+                charge: 0.0,
+            }],
+            cell.clone(),
+        );
+        let site = Point3::new(7.9, 4.0, 4.0);
+        let clearance_sq = 9.0; // 3 A contact
+        assert!(overlaps_solute(&site, &solute, &cell, clearance_sq));
     }
 
     #[test]

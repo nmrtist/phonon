@@ -448,6 +448,7 @@ mod tests {
             structure: outcome.structure,
             topology: TopologySource::File(outcome.topology_file),
             working_dir: run_dir,
+            freeze: None,
         })
         .expect("preparing a run from the built topology should succeed");
 

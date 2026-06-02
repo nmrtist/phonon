@@ -115,6 +115,10 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::ConfirmMdSystem => confirm_pending_md_system(state),
         AppAction::CancelMdSystemPrompt => cancel_pending_md_system_request(state),
         AppAction::PickMdTopologyOverride => pick_md_topology_override(state),
+        AppAction::SelectCustomForceField(name) => select_custom_force_field(state, name.clone()),
+        AppAction::SaveCustomForceField => save_custom_force_field(state),
+        AppAction::DeleteCustomForceField(name) => delete_custom_force_field(state, name.as_str()),
+        AppAction::ImportCustomForceFieldFile => import_custom_force_field_file(state),
         AppAction::StartMdRun => start_pending_md_run(state),
         AppAction::CancelMdRunPrompt => cancel_pending_md_run_request(state),
         AppAction::RefreshEngineRegistry => reprobe_engines(state),
@@ -777,12 +781,28 @@ pub(super) fn ensure_panel_form(state: &mut AppState, task_run_id: u64) {
                     ..Default::default()
                 });
             }
+            // A periodic framework keeps its crystal cell as the MD box; seed the
+            // editable lattice parameters from it, opening the out-of-plane axis to
+            // a cutoff-safe floor so the default just runs. The in-plane lattice is
+            // taken verbatim — it defines how the sheet tiles across the boundary.
+            let framework_cell =
+                crate::workflows::molecular_dynamics::is_framework(state.structure())
+                    .then(|| {
+                        state.structure().cell.as_ref().map(|cell| {
+                            let c = cell.c.max(FRAMEWORK_C_FLOOR_ANGSTROM);
+                            [cell.a, cell.b, c, cell.alpha, cell.beta, cell.gamma]
+                        })
+                    })
+                    .flatten();
             let prompt = state
                 .ui
                 .pending_md_system
                 .get_or_insert_with(Default::default);
             if prompt.run_name.trim().is_empty() {
                 prompt.run_name = default_name;
+            }
+            if prompt.framework_cell.is_none() {
+                prompt.framework_cell = framework_cell;
             }
         }
         TaskPanelKind::MdRunPrompt => {
@@ -1428,6 +1448,100 @@ fn pick_md_topology_override(state: &mut AppState) {
     }
 }
 
+/// Select (or clear) the framework build's custom force field, caching the
+/// library entry's `.itp` text so the panel and build need not re-read it.
+fn select_custom_force_field(state: &mut AppState, name: Option<String>) {
+    let Some(prompt) = state.ui.pending_md_system.as_mut() else {
+        return;
+    };
+    match name {
+        None => {
+            prompt.custom_force_field = None;
+            prompt.custom_force_field_text = None;
+        }
+        Some(name) => match crate::backend::force_fields::load_force_field(&name) {
+            Ok(text) => {
+                prompt.custom_force_field = Some(name);
+                prompt.custom_force_field_text = Some(text);
+            }
+            Err(error) => state.set_message(format!("failed to load force field: {error}")),
+        },
+    }
+}
+
+/// Save the draft custom force field to the reusable library, then select it.
+fn save_custom_force_field(state: &mut AppState) {
+    let Some(prompt) = state.ui.pending_md_system.as_ref() else {
+        return;
+    };
+    let name = prompt.custom_ff_draft_name.trim().to_string();
+    let text = prompt.custom_ff_draft.clone();
+    if name.is_empty() {
+        state.set_message("enter a name for the force field before saving".to_string());
+        return;
+    }
+    if text.trim().is_empty() {
+        state.set_message("the force field is empty".to_string());
+        return;
+    }
+    match crate::backend::force_fields::save_force_field(&name, &text) {
+        Ok(()) => {
+            if let Some(prompt) = state.ui.pending_md_system.as_mut() {
+                prompt.custom_force_field = Some(name.clone());
+                prompt.custom_force_field_text = Some(text);
+                prompt.custom_ff_draft.clear();
+                prompt.custom_ff_draft_name.clear();
+            }
+            state.set_message(format!("saved force field `{name}`"));
+        }
+        Err(error) => state.set_message(format!("failed to save force field: {error}")),
+    }
+}
+
+/// Delete a custom force field from the library; clear the selection if it was
+/// the one in use.
+fn delete_custom_force_field(state: &mut AppState, name: &str) {
+    match crate::backend::force_fields::delete_force_field(name) {
+        Ok(()) => {
+            if let Some(prompt) = state.ui.pending_md_system.as_mut()
+                && prompt.custom_force_field.as_deref() == Some(name)
+            {
+                prompt.custom_force_field = None;
+                prompt.custom_force_field_text = None;
+            }
+            state.set_message(format!("deleted force field `{name}`"));
+        }
+        Err(error) => state.set_message(format!("failed to delete force field: {error}")),
+    }
+}
+
+/// Open a file picker and load a `.itp`/`.top` into the draft custom force field,
+/// suggesting a name from the file stem.
+fn import_custom_force_field_file(state: &mut AppState) {
+    let Some(path) = rfd::FileDialog::new()
+        .set_directory(&state.config.default_project_dir)
+        .add_filter("GROMACS force field", &["itp", "top"])
+        .pick_file()
+    else {
+        return;
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            state.set_message(format!("failed to read {}: {error}", path.display()));
+            return;
+        }
+    };
+    if let Some(prompt) = state.ui.pending_md_system.as_mut() {
+        if prompt.custom_ff_draft_name.trim().is_empty()
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            prompt.custom_ff_draft_name = stem.to_string();
+        }
+        prompt.custom_ff_draft = text;
+    }
+}
+
 fn start_pending_md_run(state: &mut AppState) {
     bind_active_panel_task(state, TaskPanelKind::MdRunPrompt);
     let Some(prompt) = state.ui.pending_md_run.clone() else {
@@ -1448,13 +1562,26 @@ fn start_pending_md_run(state: &mut AppState) {
             return;
         }
     };
-    let stages = match build_md_stage_specs(&prompt.steps) {
+    let mut stages = match build_md_stage_specs(&prompt.steps) {
         Ok(stages) => stages,
         Err(error) => {
             state.set_message(error.to_string());
             return;
         }
     };
+    // A framework (nanosheet) system carries run hints from its build: keep the
+    // molecule periodic (flexible) and/or freeze the sheet (rigid). Apply them to
+    // every stage and capture the freeze selection for prepare_system.
+    let framework_freeze = state
+        .entries
+        .active_entry_id()
+        .and_then(|id| crate::frontend::md_support::load_framework_metadata_for_entry(state, id))
+        .and_then(|meta| {
+            for spec in &mut stages {
+                meta.apply_to(&mut spec.settings);
+            }
+            meta.freeze_selection()
+        });
     let gmx_launch = match resolve_md_engine_launch(state, prompt.engine) {
         Ok(launch) => launch,
         Err(error) => {
@@ -1485,6 +1612,7 @@ fn start_pending_md_run(state: &mut AppState) {
         working_dir,
         gmx_launch,
         max_duration_per_stage: Duration::from_secs(60 * 60),
+        freeze: framework_freeze,
     });
     state.optimization_origin = None;
     state.ui.pending_md_run = None;
@@ -1768,10 +1896,95 @@ fn expand_supercell(state: &mut AppState, repeats: [u32; 3]) {
 /// user can opt into explicitly.
 fn build_md_system(state: &mut AppState, prompt: &crate::frontend::state::MdSystemPrompt) -> bool {
     use crate::frontend::state::MdBuildEngine;
+    use crate::workflows::molecular_dynamics::is_framework_shape;
     match prompt.engine {
-        MdBuildEngine::Gromacs => start_gromacs_md_build(state, prompt),
+        MdBuildEngine::Gromacs => {
+            // A covalent framework (celled, bonded, non-biopolymer) has no residue
+            // template for pdb2gmx; generate its topology directly from the bonds
+            // instead. The material build validates parameters and reports any
+            // element the built-in tables and the custom force field don't cover.
+            if is_framework_shape(state.structure()) {
+                start_material_md_build(state, prompt)
+            } else {
+                start_gromacs_md_build(state, prompt)
+            }
+        }
         MdBuildEngine::BuiltIn => build_md_system_builtin(state, prompt),
     }
+}
+
+/// Out-of-plane cell length (A) the framework cell editor is seeded to when the
+/// crystal's own gap is thinner. It clears a 1.0 nm cutoff plus the Verlet
+/// buffer on both sides of the slab (`2·(1.0+0.1) nm + buffer`), so the default
+/// box runs without the user having to widen `c` first.
+const FRAMEWORK_C_FLOOR_ANGSTROM: f32 = 25.0;
+
+/// Launch the framework (nanosheet) build: generate the topology from the
+/// structure's bonds (rigid or flexible per the prompt), use the user-edited
+/// crystal cell as the box, and optionally solvate. Writes `topol.top` and
+/// `framework_run.json` into the build run directory for a later MD run.
+fn start_material_md_build(
+    state: &mut AppState,
+    prompt: &crate::frontend::state::MdSystemPrompt,
+) -> bool {
+    use crate::engines::gromacs::MaterialBuildRequest;
+
+    if state.jobs.engine_running() {
+        state.set_message("another external engine job is already running".to_string());
+        return false;
+    }
+    let gmx_launch =
+        match resolve_md_engine_launch(state, crate::frontend::state::MdEngineChoice::Gromacs) {
+            Ok(launch) => launch,
+            Err(error) => {
+                state.set_message(error.to_string());
+                return false;
+            }
+        };
+    let run_dir = match ensure_active_task_run_dir(
+        state,
+        TaskKind::BuildMdSystem,
+        Some(prompt.run_name.as_str()),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            state.set_message(format!("failed to create run directory: {error}"));
+            complete_active_task(state, TaskKind::BuildMdSystem, TaskStatus::Failed);
+            return false;
+        }
+    };
+    if let Some(task_run_id) = state.active_task_run {
+        mark_task_status(state, task_run_id, TaskStatus::Running);
+        state
+            .tasks
+            .set_engine_label(task_run_id, Some("GROMACS".to_string()));
+        sync_task_manifest(state, task_run_id);
+    }
+
+    // The box is the user-edited crystal cell, preserving its (e.g. hexagonal)
+    // shape. Falling back to the structure's own cell keeps non-GUI callers
+    // working. When an explicit cell is supplied, build_material_system uses it
+    // verbatim instead of opening the out-of-plane axis itself.
+    let cell_override = prompt.framework_cell.map(|[a, b, c, alpha, beta, gamma]| {
+        crate::domain::UnitCell::from_parameters(a, b, c, alpha, beta, gamma)
+    });
+
+    state.ui.pending_optimization = None;
+    let job = crate::frontend::jobs::spawn_material_build_job(MaterialBuildRequest {
+        structure: state.structure().clone(),
+        mode: prompt.framework_mode,
+        working_dir: run_dir,
+        gmx_launch,
+        solvation: prompt.solvation_options(),
+        cell_override,
+        custom_force_field: prompt.custom_force_field_text.clone(),
+        solvent_gap_angstrom: FRAMEWORK_C_FLOOR_ANGSTROM,
+        cutoff_nm: crate::workflows::molecular_dynamics::DEFAULT_CUTOFF_NM,
+        max_duration: Duration::from_secs(60 * 60),
+    });
+    state.jobs.set_engine(job);
+    state.set_message("Building framework MD system; press Esc to stop".to_string());
+    true
 }
 
 /// Launch the GROMACS pdb2gmx → editconf → solvate → genion pipeline as a

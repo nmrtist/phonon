@@ -31,20 +31,23 @@ use crate::{
     domain::Structure,
     engines::{
         gromacs::{
-            AnalysisContext, render_top, run_pipeline,
+            AnalysisContext, framework_run_hints, render_top, run_pipeline,
             runner::{PrepareSystemRequest, prepare_system},
             topology::TopologySource,
         },
         registry::{EngineId, EngineLaunch, EngineRegistry},
     },
     frontend::{
-        md_support::{md_topology_path_for_entry, protocol_stage_specs},
+        md_support::{
+            FrameworkRunMetadata, MD_FRAMEWORK_FILE, MD_TOPOLOGY_FILE, md_topology_path_for_entry,
+            protocol_stage_specs,
+        },
         state::AppState,
     },
     io::structure_io,
     workflows::molecular_dynamics::{
-        MdProtocolOptions, MdSystemConfig, MdTopology, SolvationOptions, WaterModel,
-        build_md_system, solvate,
+        FrameworkMode, MdProtocolOptions, MdSystemConfig, MdTopology, SolvationOptions, WaterModel,
+        build_md_system, is_framework_shape, solvate,
     },
 };
 
@@ -157,15 +160,65 @@ fn resolve_launch(state: &AppState) -> Result<EngineLaunch> {
 
 // ---- md build ---------------------------------------------------------------
 
-fn md_build(state: &mut AppState, _args: &[String]) -> Result<String> {
+fn md_build(state: &mut AppState, args: &[String]) -> Result<String> {
     if state.structure().atoms.is_empty() {
         bail!("no active structure; open one before `md build`");
     }
+    let flags = Flags::parse(args)?;
+    // A periodic framework (nanosheet) is captured with its bond-derived
+    // topology; `--framework rigid|flexible` picks the model (default rigid).
+    let framework_mode = match flags.str("framework") {
+        Some("flexible") => Some(FrameworkMode::Flexible),
+        Some("rigid") | None => Some(FrameworkMode::Rigid),
+        Some(other) => bail!("unknown --framework mode `{other}`; use rigid or flexible"),
+    };
+    // `--custom-ff <name>` merges a saved custom force field, enabling elements
+    // the built-in tables lack (or overriding their types) for a framework build.
+    let custom_force_field = match flags.str("custom-ff") {
+        Some(name) => Some(crate::backend::force_fields::load_force_field(name)?),
+        None => None,
+    };
+
     let task_run_id = create_cli_task_run(state, "build-md-system")?;
     let run_dir = ensure_cli_task_run_dir(state, task_run_id)?;
     mark_cli_task_status(state, task_run_id, TaskStatus::Running)?;
 
     let result = (|| {
+        if is_framework_shape(state.structure()) {
+            // Keep the periodic cell as built (re-boxing would break the
+            // sheet's bonds to its periodic images); capture the framework
+            // topology and the run hints a later `md simulate` applies. A custom
+            // force field, when given, covers elements the built-in tables lack
+            // and is inlined into the captured topology.
+            let mode = framework_mode.unwrap_or(FrameworkMode::Rigid);
+            let structure = state.structure().clone();
+            let custom_types = custom_force_field
+                .as_deref()
+                .map(crate::engines::gromacs::custom_ff::custom_types)
+                .unwrap_or_default();
+            let mut topology = MdTopology::framework_with_custom(&structure, mode, &custom_types)?;
+            topology.inline_force_field = custom_force_field.clone();
+            let atom_count = structure.atoms.len();
+            let save_path = structure_io::default_structure_save_path(&structure, None);
+            let entry_id = state.entries.add_entry(structure, None, save_path);
+            activate_entry(state, entry_id);
+            record_cli_task_result_entry(state, task_run_id, entry_id)?;
+
+            topology.save(&run_dir.join(MD_TOPOLOGY_FILE))?;
+            let hints = framework_run_hints(mode);
+            FrameworkRunMetadata {
+                periodic_molecules: hints.periodic_molecules,
+                freeze_group: hints.freeze_group,
+                framework_atom_count: atom_count,
+            }
+            .save(&run_dir.join(MD_FRAMEWORK_FILE))?;
+
+            return Ok(format!(
+                "Framework MD system ready ({} model): {atom_count} atoms; topology captured",
+                mode.label()
+            ));
+        }
+
         let structure = if state.structure().cell.is_none() {
             let (boxed, _report) = build_md_system(state.structure(), &MdSystemConfig::default())?;
             boxed
@@ -178,7 +231,7 @@ fn md_build(state: &mut AppState, _args: &[String]) -> Result<String> {
         record_cli_task_result_entry(state, task_run_id, entry_id)?;
 
         let topology = MdTopology::from_structure(state.structure())?;
-        topology.save(&run_dir.join("system_topology.json"))?;
+        topology.save(&run_dir.join(MD_TOPOLOGY_FILE))?;
 
         Ok(format!(
             "MD system ready: {} atoms, {} species; topology captured",
@@ -282,14 +335,26 @@ fn md_simulate(state: &mut AppState, args: &[String]) -> Result<String> {
             anyhow!("no MD system found; run `md build` first to prepare the system")
         })?;
 
+        // Framework (nanosheet) systems carry run hints: keep the molecule
+        // periodic (flexible) and/or freeze the sheet (rigid).
+        let framework_meta = state.entries.active_entry_id().and_then(|id| {
+            crate::frontend::md_support::load_framework_metadata_for_entry(state, id)
+        });
+
         let launch = resolve_launch(state)?;
         let system = prepare_system(PrepareSystemRequest {
             structure,
             topology: TopologySource::Inline(render_top(&topology)),
             working_dir: work_dir.clone(),
+            freeze: framework_meta.as_ref().and_then(|m| m.freeze_selection()),
         })?;
 
-        let stages = protocol_stage_specs(&options);
+        let mut stages = protocol_stage_specs(&options);
+        if let Some(meta) = &framework_meta {
+            for spec in &mut stages {
+                meta.apply_to(&mut spec.settings);
+            }
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let results = run_pipeline(
             system,

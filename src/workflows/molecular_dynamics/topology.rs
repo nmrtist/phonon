@@ -117,6 +117,12 @@ pub struct MoleculeType {
     /// Improper dihedrals.
     #[serde(default)]
     pub impropers: Vec<BondedTerm>,
+    /// Explicit per-atom nonbonded exclusions: `exclusions[i]` lists the 1-based
+    /// local atom indices excluded from interacting with atom `i+1`. Used by a
+    /// bond-free rigid framework (where there are no bonds for grompp to derive
+    /// exclusions from); empty for molecule types that rely on `nrexcl`.
+    #[serde(default)]
+    pub exclusions: Vec<Vec<u32>>,
 }
 
 impl MoleculeType {
@@ -134,6 +140,7 @@ impl MoleculeType {
             angles: Vec::new(),
             dihedrals: Vec::new(),
             impropers: Vec::new(),
+            exclusions: Vec::new(),
         }
     }
 
@@ -207,6 +214,13 @@ pub struct MdTopology {
     /// for monatomic/water/ion systems.
     #[serde(default)]
     pub bonded_params: Vec<BondedParam>,
+    /// Raw force-field text inserted verbatim after `[defaults]` (a
+    /// user-supplied custom force field's `[atomtypes]`/`[bondtypes]`/…). Kept
+    /// inline rather than as an `#include` so the rendered `.top` stays
+    /// self-contained and portable across run directories. `None` for fully
+    /// built-in systems; it must not contain its own `[defaults]`.
+    #[serde(default)]
+    pub inline_force_field: Option<String>,
 }
 
 impl MdTopology {
@@ -300,6 +314,7 @@ impl MdTopology {
             composition,
             defaults: None,
             bonded_params: Vec::new(),
+            inline_force_field: None,
         })
     }
 
@@ -515,6 +530,7 @@ mod tests {
             angles: Vec::new(),
             dihedrals: Vec::new(),
             impropers: Vec::new(),
+            exclusions: Vec::new(),
         });
         topo.push_run("SOL", 10);
         topo.push_run("SOL", 5);

@@ -45,12 +45,25 @@ pub enum GromacsProgress {
     Log(String),
 }
 
+/// A named index group of atoms to freeze, written to an index file so a
+/// stage's `freezegrps` can reference it. `atom_indices` are 0-based into the
+/// prepared structure; a `System` group covering every atom is written
+/// alongside it (the thermostat references `System`).
+#[derive(Debug, Clone)]
+pub struct FreezeSelection {
+    pub group: String,
+    pub atom_indices: Vec<usize>,
+}
+
 /// Input parameters for [`prepare_system`].
 #[derive(Debug, Clone)]
 pub struct PrepareSystemRequest {
     pub structure: Structure,
     pub topology: TopologySource,
     pub working_dir: PathBuf,
+    /// When set, an index file naming this group (plus `System`) is written and
+    /// passed to `grompp -n`, so a rigid framework can be frozen by name.
+    pub freeze: Option<FreezeSelection>,
 }
 
 /// Result of [`prepare_system`]: a working directory pre-populated with the
@@ -61,6 +74,9 @@ pub struct PreparedSystem {
     pub working_dir: PathBuf,
     pub conf_file: PathBuf,
     pub topology_file: PathBuf,
+    /// Index file (`index.ndx`) passed to `grompp -n`, when a freeze group was
+    /// requested. `None` for an ordinary system.
+    pub index_file: Option<PathBuf>,
     /// The original (un-minimized) structure, kept so that bond topology and
     /// element labels can be re-grafted onto coordinate files that GROMACS
     /// emits without that metadata.
@@ -201,12 +217,53 @@ pub fn prepare_system(request: PrepareSystemRequest) -> Result<PreparedSystem> {
         .topology
         .materialize(&request.working_dir, "topol.top")?;
 
+    let index_file = match &request.freeze {
+        Some(freeze) => {
+            let path = request.working_dir.join("index.ndx");
+            fs::write(
+                &path,
+                render_index_file(request.structure.atoms.len(), freeze),
+            )
+            .with_context(|| format!("failed to write {}", path.display()))?;
+            Some(path)
+        }
+        None => None,
+    };
+
     Ok(PreparedSystem {
         working_dir: request.working_dir,
         conf_file,
         topology_file,
+        index_file,
         original_structure: request.structure,
     })
+}
+
+/// Render a GROMACS index file (`.ndx`) with a `System` group covering every
+/// atom and the named freeze group. Indices are 1-based, wrapped to a column
+/// width GROMACS parses without issue.
+fn render_index_file(atom_count: usize, freeze: &FreezeSelection) -> String {
+    fn group(out: &mut String, name: &str, indices: impl Iterator<Item = usize>) {
+        out.push_str(&format!("[ {name} ]\n"));
+        for (n, index) in indices.enumerate() {
+            out.push_str(&format!("{index:>6}"));
+            if (n + 1) % 15 == 0 {
+                out.push('\n');
+            }
+        }
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+
+    let mut out = String::new();
+    group(&mut out, "System", 1..=atom_count);
+    group(
+        &mut out,
+        &freeze.group,
+        freeze.atom_indices.iter().map(|i| i + 1),
+    );
+    out
 }
 
 /// Run a single stage (grompp + mdrun) against an already-prepared system.
@@ -243,6 +300,11 @@ where
         .checkpoint_input
         .as_ref()
         .map(|p| file_name_or(p, "state.cpt"));
+    let index_name = request
+        .system
+        .index_file
+        .as_ref()
+        .map(|p| file_name_or(p, "index.ndx"));
 
     let remaining = remaining_budget(request.max_duration, started_at)?;
     report(GromacsProgress::Stage(format!(
@@ -257,6 +319,7 @@ where
                 checkpoint_name.as_deref(),
                 &topology_file_name,
                 &tpr_name,
+                index_name.as_deref(),
             ),
             Some(remaining),
         ),
@@ -389,6 +452,7 @@ pub(crate) fn build_grompp_args(
     checkpoint: Option<&str>,
     topology: &str,
     tpr: &str,
+    index: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "grompp".to_string(),
@@ -400,6 +464,12 @@ pub(crate) fn build_grompp_args(
     if let Some(checkpoint) = checkpoint {
         args.push("-t".to_string());
         args.push(checkpoint.to_string());
+    }
+    if let Some(index) = index {
+        // An index file naming the freeze group; grompp resolves `freezegrps`
+        // against it.
+        args.push("-n".to_string());
+        args.push(index.to_string());
     }
     args.extend([
         "-p".to_string(),
@@ -698,7 +768,7 @@ AR  8
     #[test]
     fn grompp_args_for_single_stage_match_legacy_form() {
         // No checkpoint -> the exact minimization argument list.
-        let args = build_grompp_args("em.mdp", "conf.gro", None, "topol.top", "em.tpr");
+        let args = build_grompp_args("em.mdp", "conf.gro", None, "topol.top", "em.tpr", None);
         let expected: Vec<String> = [
             "grompp",
             "-f",
@@ -726,11 +796,43 @@ AR  8
             Some("nvt.cpt"),
             "topol.top",
             "npt.tpr",
+            None,
         );
         let joined = args.join(" ");
         assert!(joined.contains("-t nvt.cpt"), "missing -t: {joined}");
         // -c precedes -t, and -p/-o/-maxwarn trail.
         assert!(joined.contains("-c nvt_out.gro -t nvt.cpt -p topol.top"));
+    }
+
+    #[test]
+    fn index_file_lists_system_and_freeze_groups() {
+        let ndx = render_index_file(
+            4,
+            &FreezeSelection {
+                group: "Framework".to_string(),
+                atom_indices: vec![0, 1],
+            },
+        );
+        assert!(ndx.contains("[ System ]"));
+        assert!(ndx.contains("[ Framework ]"));
+        // System covers all four atoms (1-based); the freeze group the first two.
+        assert!(ndx.contains("1     2     3     4") || ndx.contains("1") && ndx.contains("4"));
+        let frame_section = ndx.split("[ Framework ]").nth(1).unwrap();
+        assert!(frame_section.contains('1') && frame_section.contains('2'));
+        assert!(!frame_section.contains('3'));
+    }
+
+    #[test]
+    fn grompp_args_include_index_when_present() {
+        let args = build_grompp_args(
+            "em.mdp",
+            "conf.gro",
+            None,
+            "topol.top",
+            "em.tpr",
+            Some("index.ndx"),
+        );
+        assert!(args.join(" ").contains("-n index.ndx"), "{args:?}");
     }
 
     #[test]
@@ -741,6 +843,7 @@ AR  8
             working_dir: PathBuf::from("/wd"),
             conf_file: PathBuf::from("/wd/conf.gro"),
             topology_file: PathBuf::from("/wd/topol.top"),
+            index_file: None,
             original_structure: Structure::empty(),
         };
 
@@ -831,6 +934,7 @@ AR  8
             structure: argon_box(),
             topology: TopologySource::Inline(ARGON_TOP.to_string()),
             working_dir,
+            freeze: None,
         })
         .expect("system preparation should succeed");
 
@@ -881,6 +985,7 @@ AR  8
             structure: argon_box(),
             topology: TopologySource::Inline(ARGON_TOP.to_string()),
             working_dir,
+            freeze: None,
         })
         .expect("system preparation should succeed");
 
@@ -939,6 +1044,7 @@ AR  8
             structure,
             topology: TopologySource::Inline(render_top(&topology)),
             working_dir,
+            freeze: None,
         })
         .expect("system preparation should succeed");
 

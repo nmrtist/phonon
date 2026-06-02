@@ -328,6 +328,84 @@ fn cell_vectors(shape: BoxShape, edges: [f32; 3]) -> [nalgebra::Vector3<f32>; 3]
     }
 }
 
+/// The default nonbonded cutoff (nm) an MD stage uses; a periodic cell must
+/// be large enough that this fits within the minimum image (see
+/// [`ensure_periodic_cutoff_fits`]).
+pub const DEFAULT_CUTOFF_NM: f32 = 1.0;
+/// Extra clearance (nm) required beyond the bare cutoff, covering the Verlet
+/// pair-list buffer that pushes the effective interaction range past `rvdw`.
+const CUTOFF_BUFFER_NM: f32 = 0.1;
+
+/// Half the shortest distance between opposite faces of the cell, in angstroms —
+/// the radius of the largest sphere that fits inside the periodic cell, which is
+/// the limit a nonbonded cutoff must stay under (the minimum-image criterion).
+/// Returns 0 for a degenerate (zero-volume) cell.
+pub fn cell_inradius_angstrom(cell: &UnitCell) -> f32 {
+    let [a, b, c] = cell.vectors;
+    let volume = a.dot(&b.cross(&c)).abs();
+    if volume < 1.0e-6 {
+        return 0.0;
+    }
+    // Face areas opposite each lattice vector; the perpendicular height for a
+    // vector is volume / opposite-face area.
+    let height = |face: f32| volume / face;
+    let h_a = height(b.cross(&c).norm());
+    let h_b = height(a.cross(&c).norm());
+    let h_c = height(a.cross(&b).norm());
+    0.5 * h_a.min(h_b).min(h_c)
+}
+
+/// Verify a periodic cell is large enough for `cutoff_nm`: the cell's in-radius
+/// must exceed the cutoff plus the Verlet buffer, or the engine rejects the run
+/// with a minimum-image error. For a hexagonal nanosheet the binding dimension
+/// is the in-plane lattice (the 60° packing makes the usable half-width only
+/// ≈0.43× the lattice vector), so a too-small supercell fails here with an
+/// actionable message rather than as an opaque engine fatal error.
+pub fn ensure_periodic_cutoff_fits(cell: &UnitCell, cutoff_nm: f32) -> Result<()> {
+    let inradius = cell_inradius_angstrom(cell);
+    let required = (cutoff_nm + CUTOFF_BUFFER_NM) * 10.0; // nm -> angstrom
+    if inradius + 1.0e-3 < required {
+        let factor = (required / inradius.max(1.0e-3)).ceil() as u32;
+        bail!(
+            "the periodic cell is too small for a {cutoff_nm:.2} nm nonbonded cutoff: its \
+             shortest half-width is {:.2} nm, but {:.2} nm is required. Build a larger in-plane \
+             supercell (roughly {factor}x) before running MD.",
+            inradius * 0.1,
+            required * 0.1,
+        );
+    }
+    Ok(())
+}
+
+/// Replace the cell's third (out-of-plane) lattice vector with one of length
+/// `new_c_angstrom` along the same direction, preserving the in-plane vectors
+/// and every atom's Cartesian position. This is how a periodic slab (a
+/// nanosheet) makes room for solvent along c without disturbing the in-plane
+/// periodicity that keeps the sheet bonded to its images — unlike
+/// [`build_md_system`], which replaces the whole cell.
+pub fn set_slab_c_axis(structure: &Structure, new_c_angstrom: f32) -> Result<Structure> {
+    let cell = structure.cell.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("set_slab_c_axis needs a structure that already has a cell")
+    })?;
+    if new_c_angstrom <= 0.0 {
+        bail!("the c-axis length must be positive");
+    }
+    let c_dir = cell.vectors[2];
+    let c_len = c_dir.norm();
+    if c_len < 1.0e-6 {
+        bail!("the cell's c vector is degenerate; cannot rescale it");
+    }
+    let new_c = c_dir * (new_c_angstrom / c_len);
+
+    let mut out = structure.clone();
+    out.cell = Some(UnitCell::from_vectors([
+        cell.vectors[0],
+        cell.vectors[1],
+        new_c,
+    ]));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +663,72 @@ mod tests {
             assert!((o.y - r.y).abs() < 1e-2, "y mismatch {o:?} vs {r:?}");
             assert!((o.z - r.z).abs() < 1e-2, "z mismatch {o:?} vs {r:?}");
         }
+    }
+
+    /// A hexagonal nanosheet cell with in-plane lattice vector `lattice_a` and an
+    /// out-of-plane gap `c`, matching the nanosheet builder's geometry.
+    fn hexagonal_slab(lattice_a: f32, c: f32) -> UnitCell {
+        use nalgebra::Vector3;
+        UnitCell::from_vectors([
+            Vector3::new(lattice_a, 0.0, 0.0),
+            Vector3::new(lattice_a * 0.5, lattice_a * 0.866_025_4, 0.0),
+            Vector3::new(0.0, 0.0, c),
+        ])
+    }
+
+    #[test]
+    fn small_graphene_supercell_fails_cutoff_large_one_passes() {
+        // Graphene a = 2.46 A. A 4x4 supercell with a thin gap is far too small
+        // for a 1 nm cutoff; a 12x12 supercell with a generous c gap passes.
+        let small = hexagonal_slab(4.0 * 2.46, 12.0);
+        let err = ensure_periodic_cutoff_fits(&small, DEFAULT_CUTOFF_NM)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("supercell"),
+            "should advise a supercell: {err}"
+        );
+
+        // Both the in-plane lattice and the c gap must clear the cutoff.
+        let large = hexagonal_slab(12.0 * 2.46, 30.0);
+        assert!(ensure_periodic_cutoff_fits(&large, DEFAULT_CUTOFF_NM).is_ok());
+    }
+
+    #[test]
+    fn inradius_is_the_smallest_half_width() {
+        // With a generous c gap the in-plane lattice is the binding dimension:
+        // the in-radius is 0.5 * sin60 * L.
+        let l = 24.6;
+        let inradius = cell_inradius_angstrom(&hexagonal_slab(l, 60.0));
+        assert!(
+            (inradius - 0.5 * 0.866_025_4 * l).abs() < 1e-2,
+            "{inradius}"
+        );
+
+        // A thin gap makes c the binding dimension instead (half the gap).
+        let thin = cell_inradius_angstrom(&hexagonal_slab(l, 12.0));
+        assert!((thin - 6.0).abs() < 1e-2, "{thin}");
+    }
+
+    #[test]
+    fn set_slab_c_axis_extends_c_and_keeps_in_plane_and_atoms() {
+        let sheet = Structure::with_cell_and_bonds(
+            "sheet",
+            vec![atom("C", 1.0, 1.0, 0.0), atom("C", 2.0, 1.0, 0.0)],
+            vec![Bond::with_type(0, 1, BondType::Single)],
+            hexagonal_slab(2.46, 12.0),
+        );
+
+        let extended = set_slab_c_axis(&sheet, 40.0).unwrap();
+        let cell = extended.cell.as_ref().unwrap();
+        // In-plane vectors unchanged; c extended to 40 A.
+        assert!((cell.vectors[0].x - 2.46).abs() < 1e-4);
+        assert!((cell.vectors[1].y - 2.46 * 0.866_025_4).abs() < 1e-3);
+        assert!((cell.vectors[2].z - 40.0).abs() < 1e-4);
+        // Atoms and bonds are preserved verbatim.
+        assert_eq!(extended.atoms.len(), 2);
+        assert_eq!(extended.atoms[0].position, sheet.atoms[0].position);
+        assert_eq!(extended.bonds.len(), 1);
     }
 
     #[test]

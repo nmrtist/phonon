@@ -327,6 +327,28 @@ pub struct MdSystemPrompt {
     /// Which engine assembles the system. GROMACS (the default) produces a
     /// force-field topology a run reuses; the built-in path is geometry only.
     pub engine: MdBuildEngine,
+    /// For a periodic framework (nanosheet) built with GROMACS, whether the
+    /// sheet is modeled rigidly (frozen) or flexibly (bonded). Ignored for
+    /// non-framework structures.
+    pub framework_mode: crate::workflows::molecular_dynamics::FrameworkMode,
+    /// For a periodic framework (nanosheet), the simulation cell's lattice
+    /// parameters `[a, b, c, α, β, γ]` (lengths in A, angles in degrees), seeded
+    /// from the input crystal cell when the panel opens and freely editable. The
+    /// build uses this cell verbatim, preserving its shape (e.g. hexagonal), so
+    /// the box matches the material rather than a generic cuboid. `None` until
+    /// seeded / for non-framework structures.
+    pub framework_cell: Option<[f32; 6]>,
+    /// Name of the custom force field (from the reusable library) merged into a
+    /// framework build, or `None` for built-in parameters only. Used to cover
+    /// elements the built-in tables lack, or to override built-in types.
+    pub custom_force_field: Option<String>,
+    /// Cached `.itp` text of the selected `custom_force_field`, loaded when the
+    /// selection changes so the panel and build don't re-read it each frame.
+    pub custom_force_field_text: Option<String>,
+    /// Draft name and `.itp` text for composing/importing a new custom force
+    /// field before saving it to the library.
+    pub custom_ff_draft_name: String,
+    pub custom_ff_draft: String,
     pub mode: MdSystemSizingMode,
     pub padding_angstrom: [f32; 3],
     pub absolute_angstrom: [f32; 3],
@@ -352,6 +374,12 @@ impl Default for MdSystemPrompt {
         Self {
             run_name: String::new(),
             engine: MdBuildEngine::default(),
+            framework_mode: crate::workflows::molecular_dynamics::FrameworkMode::Rigid,
+            framework_cell: None,
+            custom_force_field: None,
+            custom_force_field_text: None,
+            custom_ff_draft_name: String::new(),
+            custom_ff_draft: String::new(),
             mode: MdSystemSizingMode::Padding,
             padding_angstrom: [crate::workflows::molecular_dynamics::DEFAULT_PADDING_ANGSTROM; 3],
             absolute_angstrom: [30.0; 3],

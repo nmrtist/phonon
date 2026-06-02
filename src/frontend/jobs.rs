@@ -15,11 +15,12 @@ use crate::{
     engines::{
         forcefield::{OptimizationOptions, OptimizationReport},
         gromacs::{
-            BuildRequest, GromacsProgress, StageResult, StageSpec, TopologySource, build_system,
-            prepare_system, run_pipeline,
+            BuildRequest, GromacsProgress, MaterialBuildRequest, StageResult, StageSpec,
+            TopologySource, build_material_system, build_system, prepare_system, run_pipeline,
         },
         registry::EngineLaunch,
     },
+    frontend::md_support::{FrameworkRunMetadata, MD_FRAMEWORK_FILE},
     workflows::optimization::{
         GeometryOptimizationProgress, GeometryOptimizationRequest, run_geometry_optimization,
     },
@@ -71,6 +72,8 @@ pub struct GromacsPipelineRequest {
     pub working_dir: PathBuf,
     pub gmx_launch: EngineLaunch,
     pub max_duration_per_stage: Duration,
+    /// Atoms to freeze (a rigid framework's sheet); `None` for an ordinary run.
+    pub freeze: Option<crate::engines::gromacs::FreezeSelection>,
 }
 
 /// A background engine job that the UI is currently polling.
@@ -215,6 +218,7 @@ pub fn spawn_gromacs_pipeline_job(request: GromacsPipelineRequest) -> RunningEng
             structure: request.structure,
             topology: request.topology,
             working_dir: request.working_dir,
+            freeze: request.freeze,
         });
         let outcome = system.and_then(|system| {
             run_pipeline(
@@ -279,6 +283,63 @@ pub fn spawn_gromacs_build_job(request: BuildRequest) -> RunningEngineJob {
 
         match outcome {
             Ok(outcome) => {
+                let _ = sender.send(EngineWorkerMessage::Finished(Box::new(EngineSuccess {
+                    engine: "gromacs",
+                    job_kind: "build-md",
+                    structure: outcome.structure,
+                    summary: outcome.summary,
+                    working_dir: outcome.working_dir,
+                })));
+            }
+            Err(error) => {
+                let _ = sender.send(EngineWorkerMessage::Failed(error.to_string()));
+            }
+        }
+    });
+
+    RunningEngineJob {
+        engine: "gromacs",
+        job_kind: "build-md",
+        cancel,
+        receiver,
+        latest_stage: None,
+        log_tail: Vec::new(),
+    }
+}
+
+/// Spawn the framework (nanosheet) build as a background engine job: it
+/// generates the topology directly from the structure's bonds and optionally
+/// solvates, writing `topol.top` and `framework_run.json` into
+/// `request.working_dir` so a later MD run reuses both. Reported as a `build-md`
+/// success, so the same completion handling adds the boxed entry.
+pub fn spawn_material_build_job(request: MaterialBuildRequest) -> RunningEngineJob {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_worker = Arc::clone(&cancel);
+
+    std::thread::spawn(move || {
+        let report_sender = sender.clone();
+        let outcome =
+            build_material_system(request, cancel_for_worker, move |progress| match progress {
+                GromacsProgress::Stage(stage) => {
+                    let _ = report_sender.send(EngineWorkerMessage::Stage(stage));
+                }
+                GromacsProgress::Log(line) => {
+                    let _ = report_sender.send(EngineWorkerMessage::Log(line));
+                }
+            });
+
+        match outcome {
+            Ok(outcome) => {
+                // Record the run hints so the MD run applies periodic-molecules
+                // / freeze settings; a write failure is non-fatal (the run falls
+                // back to plain settings).
+                let meta = FrameworkRunMetadata {
+                    periodic_molecules: outcome.hints.periodic_molecules,
+                    freeze_group: outcome.hints.freeze_group.clone(),
+                    framework_atom_count: outcome.framework_atom_count,
+                };
+                let _ = meta.save(&outcome.working_dir.join(MD_FRAMEWORK_FILE));
                 let _ = sender.send(EngineWorkerMessage::Finished(Box::new(EngineSuccess {
                     engine: "gromacs",
                     job_kind: "build-md",

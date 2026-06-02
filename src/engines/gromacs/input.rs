@@ -194,6 +194,22 @@ pub struct MdpSettings {
     pub constraints: Option<ConstraintKind>,
     /// Constraint solver used when `constraints` is set.
     pub constraint_algorithm: ConstraintAlgorithm,
+    /// Emit `periodic-molecules = yes`. Required when a molecule is bonded across
+    /// the periodic boundary (a flexible periodic framework such as a nanosheet),
+    /// so grompp does not try to make the molecule whole.
+    pub periodic_molecules: bool,
+    /// Freeze a group of atoms in place (all three dimensions). Used to hold a
+    /// rigid framework fixed while the surrounding system evolves. The named
+    /// group must exist in the index file passed to grompp.
+    pub freeze: Option<FreezeGroup>,
+}
+
+/// A set of atoms frozen in place during a run. Only full (3D) freezing is
+/// supported, which is the only mode the Verlet cutoff scheme honors reliably.
+#[derive(Debug, Clone)]
+pub struct FreezeGroup {
+    /// Index group name (must appear in the `.ndx` file given to `grompp -n`).
+    pub group: String,
 }
 
 impl MdpSettings {
@@ -214,6 +230,8 @@ impl MdpSettings {
             output: None,
             constraints: None,
             constraint_algorithm: ConstraintAlgorithm::Lincs,
+            periodic_molecules: false,
+            freeze: None,
         }
     }
 
@@ -355,6 +373,18 @@ pub fn render_mdp(settings: &MdpSettings) -> String {
         settings.vdw_cutoff_nm
     ));
     body.push_str("pbc                      = xyz\n");
+    if settings.periodic_molecules {
+        // Required when a molecule is bonded across the periodic boundary (a
+        // flexible periodic framework): keep it as-is rather than trying to make
+        // it whole.
+        body.push_str("periodic-molecules       = yes\n");
+    }
+    if let Some(freeze) = &settings.freeze {
+        // Hold a rigid framework fixed in all three dimensions. Full freezing is
+        // the only mode the Verlet scheme honors reliably.
+        body.push_str(&format!("freezegrps               = {}\n", freeze.group));
+        body.push_str("freezedim                = Y Y Y\n");
+    }
     match settings.constraints {
         Some(kind) => {
             body.push_str(&format!(
@@ -445,9 +475,7 @@ fn join_floats(values: &[f32]) -> String {
 
 fn format_box_vectors(vectors: [nalgebra::Vector3<f32>; 3]) -> String {
     let nm = |v: f32| v * ANGSTROM_TO_NM;
-    let v1 = vectors[0];
-    let v2 = vectors[1];
-    let v3 = vectors[2];
+    let [v1, v2, v3] = reduce_box(vectors);
 
     let off_diag_tolerance = 1.0e-5_f32;
     let triclinic = v1.y.abs() > off_diag_tolerance
@@ -473,6 +501,38 @@ fn format_box_vectors(vectors: [nalgebra::Vector3<f32>; 3]) -> String {
     } else {
         format!("{:>10.5}{:>10.5}{:>10.5}\n", nm(v1.x), nm(v2.y), nm(v3.z))
     }
+}
+
+/// Reduce a triclinic cell to the form GROMACS requires: a lower-triangular box
+/// whose off-diagonal elements are no larger than half the corresponding
+/// diagonal (`|v2x| ≤ v1x/2`, `|v3x| ≤ v1x/2`, `|v3y| ≤ v2y/2`). The lattice is
+/// unchanged — only the choice of representative vectors. A cell already in
+/// range (the hexagonal nanosheet cell sits exactly at the half boundary, which
+/// GROMACS accepts) is returned untouched; an over-skewed cell is brought in.
+fn reduce_box([v1, mut v2, mut v3]: [nalgebra::Vector3<f32>; 3]) -> [nalgebra::Vector3<f32>; 3] {
+    // Shift `hi` by integer multiples of `lo` until component `comp` lies in
+    // (-lo[comp]/2, +lo[comp]/2]. Strict comparisons leave an exact half in
+    // place (so the canonical hexagonal/dodecahedral form is preserved).
+    fn bring_in_range(hi: &mut nalgebra::Vector3<f32>, lo: nalgebra::Vector3<f32>, comp: usize) {
+        if lo[comp].abs() < 1.0e-6 {
+            return;
+        }
+        let half = 0.5 * lo[comp];
+        let mut guard = 0;
+        while hi[comp] > half && guard < 1_000 {
+            *hi -= lo;
+            guard += 1;
+        }
+        while hi[comp] < -half && guard < 1_000 {
+            *hi += lo;
+            guard += 1;
+        }
+    }
+
+    bring_in_range(&mut v3, v2, 1);
+    bring_in_range(&mut v3, v1, 0);
+    bring_in_range(&mut v2, v1, 0);
+    [v1, v2, v3]
 }
 
 fn atom_name_for(element: &str, serial: usize) -> String {
@@ -603,6 +663,35 @@ mod tests {
     }
 
     #[test]
+    fn box_reduction_brings_overskewed_cells_into_range() {
+        use nalgebra::Vector3;
+        // v2x = 0.9*a is more skewed than the half limit; reduction shifts it in.
+        let a = 10.0;
+        let reduced = reduce_box([
+            Vector3::new(a, 0.0, 0.0),
+            Vector3::new(0.9 * a, a, 0.0),
+            Vector3::new(0.0, 0.0, a),
+        ]);
+        assert!(
+            reduced[1].x.abs() <= 0.5 * a + 1e-4,
+            "v2x not reduced: {}",
+            reduced[1].x
+        );
+    }
+
+    #[test]
+    fn box_reduction_preserves_a_canonical_hexagonal_cell() {
+        use nalgebra::Vector3;
+        // The nanosheet hexagonal cell sits exactly at the half boundary, which
+        // GROMACS accepts; reduction must leave it untouched.
+        let a = 2.46;
+        let v2 = Vector3::new(a * 0.5, a * 0.866_025_4, 0.0);
+        let reduced = reduce_box([Vector3::new(a, 0.0, 0.0), v2, Vector3::new(0.0, 0.0, 12.0)]);
+        assert!((reduced[1].x - v2.x).abs() < 1e-6);
+        assert!((reduced[1].y - v2.y).abs() < 1e-6);
+    }
+
+    #[test]
     fn energy_minimization_mdp_is_byte_stable() {
         // Guards backward compatibility with the committed EM integration: this
         // is the exact historical output.
@@ -623,6 +712,26 @@ pbc                      = xyz
 constraints              = none
 ";
         assert_eq!(mdp, expected);
+    }
+
+    #[test]
+    fn periodic_molecules_and_freeze_render_only_when_set() {
+        // Off by default: no framework directives leak into an ordinary run.
+        let plain = render_mdp(&MdpSettings::nvt(300.0));
+        assert!(!plain.contains("periodic-molecules"));
+        assert!(!plain.contains("freezegrps"));
+
+        // A rigid framework freezes its group; a flexible one marks the molecule
+        // periodic.
+        let mut settings = MdpSettings::nvt(300.0);
+        settings.periodic_molecules = true;
+        settings.freeze = Some(FreezeGroup {
+            group: "Framework".to_string(),
+        });
+        let mdp = render_mdp(&settings);
+        assert!(mdp.contains("periodic-molecules       = yes"));
+        assert!(mdp.contains("freezegrps               = Framework"));
+        assert!(mdp.contains("freezedim                = Y Y Y"));
     }
 
     #[test]

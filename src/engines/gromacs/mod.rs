@@ -9,8 +9,10 @@
 
 pub mod analysis;
 pub mod build;
+pub mod custom_ff;
 pub mod exec;
 pub mod input;
+pub mod material;
 pub mod output;
 pub mod runner;
 pub mod topgen;
@@ -18,10 +20,14 @@ pub mod topology;
 
 pub use analysis::{AnalysisContext, Xvg, energy_term_selection, gmx_energy, parse_xvg};
 pub use build::{BuildOutcome, BuildRequest, IonOptions, build_system};
-pub use input::{Integrator, MdpSettings};
+pub use input::{FreezeGroup, Integrator, MdpSettings};
+pub use material::{
+    FRAMEWORK_FREEZE_GROUP, FrameworkRunHints, MaterialBuildOutcome, MaterialBuildRequest,
+    build_material_system, framework_freeze_selection, framework_run_hints,
+};
 pub use runner::{
-    FileRef, GromacsProgress, PrepareSystemRequest, PreparedSystem, StageFileRole, StageLinks,
-    StageRequest, StageResult, StageSpec, prepare_system, run_pipeline, run_stage,
+    FileRef, FreezeSelection, GromacsProgress, PrepareSystemRequest, PreparedSystem, StageFileRole,
+    StageLinks, StageRequest, StageResult, StageSpec, prepare_system, run_pipeline, run_stage,
 };
 pub use topgen::render_top;
 pub use topology::TopologySource;
