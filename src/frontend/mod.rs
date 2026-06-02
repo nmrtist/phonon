@@ -7,6 +7,7 @@ mod dispatcher;
 mod jobs;
 mod md_commands;
 mod md_support;
+mod nanosheet_panel;
 mod reticular_panel;
 mod selection;
 mod services;
@@ -25,6 +26,7 @@ pub use cli::{
     CliScriptRequest, CliScriptResult, cli_help_text, parse_cli_script_request, run_cli_script,
 };
 pub use console::CommandConsoleState;
+pub use nanosheet_panel::NanosheetBuilderPanel;
 pub use reticular_panel::ReticularBuilderPanel;
 pub use selection::AtomSelection;
 pub use state::AtomStyle;

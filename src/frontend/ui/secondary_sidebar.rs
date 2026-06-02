@@ -120,6 +120,7 @@ fn render_secondary_sidebar_content(
 
     match task.panel {
         TaskPanelKind::ReticularBuilder => render_framework_task_panel(state, ui, actions),
+        TaskPanelKind::NanosheetBuilder => render_nanosheet_task_panel(state, ui, actions),
         TaskPanelKind::BuildingBlockEditor => render_building_block_task_panel(state, ui, actions),
         TaskPanelKind::OptimizationPrompt => render_optimization_task_panel(state, ui, actions),
         TaskPanelKind::SupercellPrompt => render_supercell_task_panel(state, ui, actions),
@@ -164,6 +165,39 @@ fn render_framework_task_panel(
                 .clicked()
             {
                 actions.push(AppAction::CancelFramework);
+            }
+        });
+    } else {
+        ui.label("Task panel is not active.");
+    }
+}
+
+fn render_nanosheet_task_panel(
+    state: &mut AppState,
+    ui: &mut egui::Ui,
+    actions: &mut Vec<AppAction>,
+) {
+    if let Some(panel) = &mut state.ui.nanosheet_builder {
+        panel.ui(ui);
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("{}  Preview", egui_phosphor::regular::EYE))
+                .clicked()
+            {
+                actions.push(AppAction::PreviewNanosheet);
+            }
+            if ui
+                .button(format!("{}  Build", egui_phosphor::regular::HAMMER))
+                .clicked()
+            {
+                actions.push(AppAction::BuildNanosheet);
+            }
+            if ui
+                .button(format!("{}  Cancel", egui_phosphor::regular::X))
+                .clicked()
+            {
+                actions.push(AppAction::CancelNanosheet);
             }
         });
     } else {

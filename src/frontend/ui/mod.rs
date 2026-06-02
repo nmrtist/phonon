@@ -1056,7 +1056,7 @@ fn render_entry_list_item(
 /// category shown as a collapsible group in the task list.
 fn task_category(theme: &str) -> &'static str {
     match theme {
-        "Reticular Design" => "Structure Builder",
+        "Reticular Design" | "2D Materials" => "Structure Builder",
         "Geometry" => "Optimization",
         "Molecular Dynamics" => "Molecular Dynamics",
         // "Structure Editing" and "Crystal Editing" both fold into editing.

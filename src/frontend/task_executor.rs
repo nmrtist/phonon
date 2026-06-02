@@ -47,6 +47,10 @@ const TASK_EXECUTORS: &[TaskExecutor] = &[
         run: run_reticular_builder,
     },
     TaskExecutor {
+        kind: TaskKind::BuildNanosheet,
+        run: run_nanosheet_builder,
+    },
+    TaskExecutor {
         kind: TaskKind::CreateBuildingBlock,
         run: run_building_block_editor,
     },
@@ -95,6 +99,11 @@ pub(super) fn task_executor(kind: TaskKind) -> Option<&'static TaskExecutor> {
 fn run_reticular_builder(state: &mut AppState, task_run_id: u64) {
     wait_for_input(state, task_run_id);
     dispatcher::build_framework_task(state);
+}
+
+fn run_nanosheet_builder(state: &mut AppState, task_run_id: u64) {
+    wait_for_input(state, task_run_id);
+    dispatcher::build_nanosheet_task(state);
 }
 
 fn run_building_block_editor(state: &mut AppState, task_run_id: u64) {

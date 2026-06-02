@@ -3,6 +3,7 @@ use std::{collections::HashSet, path::PathBuf, time::SystemTime};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
     BuildReticularStructure,
+    BuildNanosheet,
     CreateBuildingBlock,
     OptimizeGeometry,
     OptimizeCrystalGeometry,
@@ -19,6 +20,7 @@ pub enum TaskKind {
 pub enum TaskPanelKind {
     None,
     ReticularBuilder,
+    NanosheetBuilder,
     BuildingBlockEditor,
     OptimizationPrompt,
     SupercellPrompt,
@@ -94,6 +96,20 @@ const TASK_CONTROLLERS: &[TaskController] = &[
         description: "Compose cores, linkers, and substituents into a periodic reticular structure.",
         kind: TaskKind::BuildReticularStructure,
         panel: TaskPanelKind::ReticularBuilder,
+        outcome: TaskOutcome::CreateEntry,
+        backend: TaskBackend::InlineNative,
+        uses_run_directory: false,
+    },
+    TaskController {
+        id: "build-nanosheet",
+        title: "Nanosheet Builder",
+        short_title: "Nanosheet Builder",
+        theme: "2D Materials",
+        method: "Lattice Generation",
+        application: "Sheet Generation",
+        description: "Generate periodic 2D materials (honeycomb sheets, transition-metal dichalcogenides, graphitic carbon nitrides) from parametrized lattice families.",
+        kind: TaskKind::BuildNanosheet,
+        panel: TaskPanelKind::NanosheetBuilder,
         outcome: TaskOutcome::CreateEntry,
         backend: TaskBackend::InlineNative,
         uses_run_directory: false,

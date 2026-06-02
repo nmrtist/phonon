@@ -11,8 +11,8 @@ use crate::{
     },
     domain::Structure,
     frontend::{
-        AtomSelection, BuildingBlockEditor, CommandConsoleState, ReticularBuilderPanel,
-        StructureEditor, ViewCamera, ViewportVisualState,
+        AtomSelection, BuildingBlockEditor, CommandConsoleState, NanosheetBuilderPanel,
+        ReticularBuilderPanel, StructureEditor, ViewCamera, ViewportVisualState,
         jobs::JobManager,
         viewport::ViewportCache,
         viewport_defaults::{apply_entry_render_defaults, apply_solvent_render_default},
@@ -664,6 +664,7 @@ pub struct UiState {
     pub console: CommandConsoleState,
     pub editor: Option<StructureEditor>,
     pub reticular_builder: Option<ReticularBuilderPanel>,
+    pub nanosheet_builder: Option<NanosheetBuilderPanel>,
     pub block_editor: Option<BuildingBlockEditor>,
     pub pending_optimization: Option<OptimizationPrompt>,
     pub pending_supercell: Option<SupercellPrompt>,
@@ -696,6 +697,7 @@ impl Default for UiState {
             console: CommandConsoleState::default(),
             editor: None,
             reticular_builder: None,
+            nanosheet_builder: None,
             block_editor: None,
             pending_optimization: None,
             pending_supercell: None,
@@ -1043,6 +1045,7 @@ impl AppState {
         self.ui.pending_md_run = None;
         self.ui.editor = None;
         self.ui.reticular_builder = None;
+        self.ui.nanosheet_builder = None;
         self.ui.block_editor = None;
         self.edit_origin = None;
         self.builder_origin = None;
@@ -1083,6 +1086,7 @@ impl AppState {
     pub fn history_navigation_enabled(&self) -> bool {
         self.ui.editor.is_none()
             && self.ui.reticular_builder.is_none()
+            && self.ui.nanosheet_builder.is_none()
             && self.ui.block_editor.is_none()
             && self.ui.pending_optimization.is_none()
             && self.ui.pending_md_system.is_none()

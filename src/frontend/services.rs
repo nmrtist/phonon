@@ -6,6 +6,7 @@ use crate::{
     domain::Structure,
     frontend::{BuildingBlockEditor, bond_geometry_summary},
     io::structure_io,
+    workflows::nanosheet::{NanosheetSpec, build_nanosheet},
     workflows::reticular::{ReticularBuildSpec, build_framework},
 };
 
@@ -55,6 +56,25 @@ impl ReticularService {
 
     pub fn build(spec: &ReticularBuildSpec) -> Result<BuiltFramework> {
         let structure = build_framework(spec)?;
+        let analysis = bond_geometry_summary(&structure);
+        let save_path = PathBuf::from(format!("{}.cif", spec.name));
+        Ok(BuiltFramework {
+            structure,
+            save_path,
+            analysis,
+        })
+    }
+}
+
+pub struct NanosheetService;
+
+impl NanosheetService {
+    pub fn preview(spec: &NanosheetSpec) -> Result<BuiltFramework> {
+        Self::build(spec)
+    }
+
+    pub fn build(spec: &NanosheetSpec) -> Result<BuiltFramework> {
+        let structure = build_nanosheet(spec)?;
         let analysis = bond_geometry_summary(&structure);
         let save_path = PathBuf::from(format!("{}.cif", spec.name));
         Ok(BuiltFramework {

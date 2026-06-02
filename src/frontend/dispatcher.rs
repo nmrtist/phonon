@@ -30,7 +30,8 @@ use crate::{
         },
         md_support::{gromacs_topology_path_for_entry, load_md_topology_for_entry},
         services::{
-            BuildingBlockService, ReticularService, StructureService, require_periodic_structure,
+            BuildingBlockService, NanosheetService, ReticularService, StructureService,
+            require_periodic_structure,
         },
         state::AppState,
         structure_import::{import_document, load_document},
@@ -100,6 +101,9 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::PreviewFramework => preview_framework_task(state),
         AppAction::BuildFramework => accept_framework_task(state),
         AppAction::CancelFramework => cancel_framework_task(state),
+        AppAction::PreviewNanosheet => preview_nanosheet_task(state),
+        AppAction::BuildNanosheet => accept_nanosheet_task(state),
+        AppAction::CancelNanosheet => cancel_nanosheet_task(state),
         AppAction::SaveBuildingBlock => save_block_editor_task(state),
         AppAction::CancelBuildingBlock => cancel_block_editor_task(state),
         AppAction::StartOptimization => start_pending_optimization(state),
@@ -791,11 +795,20 @@ pub(super) fn ensure_panel_form(state: &mut AppState, task_run_id: u64) {
         }
         TaskPanelKind::ReticularBuilder => {
             if state.ui.reticular_builder.is_none() {
-                if state.builder_origin.is_none() {
+                if state.builder_origin.is_none() && state.has_active_entry() {
                     state.builder_origin = Some(state.capture_edit_snapshot());
                 }
                 let panel = crate::frontend::ReticularBuilderPanel::new(state.structure());
                 state.ui.reticular_builder = Some(panel);
+            }
+        }
+        TaskPanelKind::NanosheetBuilder => {
+            if state.ui.nanosheet_builder.is_none() {
+                if state.builder_origin.is_none() && state.has_active_entry() {
+                    state.builder_origin = Some(state.capture_edit_snapshot());
+                }
+                let panel = crate::frontend::NanosheetBuilderPanel::new(state.structure());
+                state.ui.nanosheet_builder = Some(panel);
             }
         }
         TaskPanelKind::BuildingBlockEditor => {
@@ -1074,7 +1087,11 @@ fn cancel_structure_edits(state: &mut AppState) {
 pub(super) fn build_framework_task(state: &mut AppState) {
     state.cancel_transient_jobs();
     state.ui.pending_optimization = None;
-    state.builder_origin = Some(state.capture_edit_snapshot());
+    // Frameworks can be built from an empty workspace, where there is no active
+    // entry to snapshot for undo; only capture an origin when one exists.
+    state.builder_origin = state
+        .has_active_entry()
+        .then(|| state.capture_edit_snapshot());
     state.ui.reticular_builder = Some(crate::frontend::ReticularBuilderPanel::new(
         state.structure(),
     ));
@@ -1142,6 +1159,71 @@ fn cancel_framework_task(state: &mut AppState) {
     state.ui.reticular_builder = None;
     state.set_message("Reticular structure build canceled".to_string());
     complete_active_task(state, TaskKind::BuildReticularStructure, TaskStatus::Failed);
+    close_active_task_panel(state);
+}
+
+pub(super) fn build_nanosheet_task(state: &mut AppState) {
+    state.cancel_transient_jobs();
+    state.ui.pending_optimization = None;
+    // A nanosheet is built from scratch, so the workspace is often empty (no
+    // active entry to snapshot for undo); only capture an origin when one exists.
+    state.builder_origin = state
+        .has_active_entry()
+        .then(|| state.capture_edit_snapshot());
+    state.ui.nanosheet_builder = Some(crate::frontend::NanosheetBuilderPanel::new(
+        state.structure(),
+    ));
+}
+
+fn preview_nanosheet_task(state: &mut AppState) {
+    let Some(panel) = &state.ui.nanosheet_builder else {
+        return;
+    };
+    match NanosheetService::preview(&panel.spec) {
+        Ok(built) => {
+            state.cancel_transient_jobs();
+            state.ui.pending_optimization = None;
+            *state.structure_mut() = built.structure;
+            state.mark_structure_changed();
+            state.set_source_path(None);
+            state.set_save_path(built.save_path);
+            state.ui.camera = crate::frontend::ViewCamera::default();
+            state.ui.selection.clear();
+            state.set_message(format!("Nanosheet preview generated; {}", built.analysis));
+        }
+        Err(error) => state.set_message(format!("Nanosheet build failed: {error}")),
+    }
+}
+
+fn accept_nanosheet_task(state: &mut AppState) {
+    let Some(panel) = &state.ui.nanosheet_builder else {
+        return;
+    };
+    match NanosheetService::build(&panel.spec) {
+        Ok(built) => {
+            if let Some(before) = state.builder_origin.take() {
+                state.restore_edit_snapshot(before);
+            }
+            add_and_show_entry(state, built.structure, None, built.save_path);
+            state.set_message(format!("Nanosheet built; {}", built.analysis));
+            complete_active_task(state, TaskKind::BuildNanosheet, TaskStatus::Completed);
+            close_active_task_panel(state);
+        }
+        Err(error) => state.set_message(format!("Nanosheet build failed: {error}")),
+    }
+}
+
+fn cancel_nanosheet_task(state: &mut AppState) {
+    if let Some(before) = state.builder_origin.take() {
+        state.restore_edit_snapshot(before);
+    } else if let Some(panel) = &state.ui.nanosheet_builder {
+        *state.structure_mut() = panel.original.clone();
+        state.mark_structure_changed();
+        state.ui.nanosheet_builder = None;
+    }
+    state.ui.nanosheet_builder = None;
+    state.set_message("Nanosheet build canceled".to_string());
+    complete_active_task(state, TaskKind::BuildNanosheet, TaskStatus::Failed);
     close_active_task_panel(state);
 }
 
@@ -2146,6 +2228,23 @@ mod tests {
         let atom = &state.structure().atoms[0];
         assert!(atom.position.x >= 0.0 && atom.position.x < 10.0);
         assert!(atom.position.y >= 0.0 && atom.position.y < 10.0);
+    }
+
+    #[test]
+    fn nanosheet_task_opens_and_builds_on_empty_workspace() {
+        // A nanosheet is the natural first thing to build with nothing loaded;
+        // opening and building it must not require (or panic without) an entry.
+        let ctx = Context::default();
+        let mut state = scratch_state(Structure::empty());
+        assert!(!state.has_active_entry());
+
+        super::dispatch(&mut state, AppAction::CreateTask("build-nanosheet"), &ctx);
+        assert!(state.ui.nanosheet_builder.is_some(), "panel should open");
+
+        super::dispatch(&mut state, AppAction::BuildNanosheet, &ctx);
+        assert!(state.has_active_entry(), "build should create an entry");
+        assert!(state.structure().cell.is_some());
+        assert!(state.structure().atoms.len() > 2);
     }
 
     fn scratch_state(structure: Structure) -> AppState {
