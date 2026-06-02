@@ -42,6 +42,7 @@ pub enum AppAction {
     ),
     ActivateEntry(u64),
     DeleteEntry(u64),
+    DeleteEntries(Vec<u64>),
     RenameEntry {
         entry_id: u64,
         new_name: String,
@@ -54,6 +55,7 @@ pub enum AppAction {
         new_name: String,
     },
     DeleteGroup(String),
+    DeleteGroupWithEntries(String),
     MoveEntryToGroup {
         entry_id: u64,
         group_id: String,

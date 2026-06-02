@@ -84,12 +84,14 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::SetCategoryStyle(category, style) => set_category_style(state, category, style),
         AppAction::ActivateEntry(entry_id) => activate_entry(state, entry_id),
         AppAction::DeleteEntry(entry_id) => delete_entry(state, entry_id),
+        AppAction::DeleteEntries(ids) => delete_entries(state, ids),
         AppAction::RenameEntry { entry_id, new_name } => {
             state.entries.rename_entry(entry_id, new_name)
         }
         AppAction::CreateGroup { name } => create_group(state, name),
         AppAction::RenameGroup { group_id, new_name } => rename_group(state, &group_id, &new_name),
         AppAction::DeleteGroup(group_id) => delete_group(state, &group_id),
+        AppAction::DeleteGroupWithEntries(group_id) => delete_group_with_entries(state, &group_id),
         AppAction::MoveEntryToGroup { entry_id, group_id } => {
             move_entry_to_group(state, entry_id, &group_id)
         }
@@ -437,7 +439,10 @@ fn replace_workspace_from_project(
     state.ui.project_viewport = snapshot.view.viewport;
     state.ui.viewport = state.ui.project_viewport.clone();
     state.ui.entry_viewports = snapshot.view.entry_viewports;
-    state.ui.entry_list.selected_entry_id = state.entries.active_entry_id();
+    state.ui.entry_list.selected_entry_ids.clear();
+    if let Some(id) = state.entries.active_entry_id() {
+        state.ui.entry_list.selected_entry_ids.insert(id);
+    }
     reset_transient_state(state);
     state.load_viewport_for_active_entry();
     let set_current_dir_error = std::env::set_current_dir(&project.root).err();
@@ -891,7 +896,8 @@ fn add_and_show_entry(
 ) -> u64 {
     state.save_viewport_for_active_entry();
     let entry_id = state.entries.add_entry(structure, source_path, save_path);
-    state.ui.entry_list.selected_entry_id = Some(entry_id);
+    state.ui.entry_list.selected_entry_ids.clear();
+    state.ui.entry_list.selected_entry_ids.insert(entry_id);
     // `load_active_entry` resets transient state, which includes the active task
     // run. When a task (e.g. an MD system build) produces and shows its result
     // entry, that task context must survive so the caller can still mark the run
@@ -909,7 +915,7 @@ fn activate_entry(state: &mut AppState, entry_id: u64) {
     }
     state.save_viewport_for_active_entry();
     state.entries.activate_entry(entry_id);
-    state.ui.entry_list.selected_entry_id = Some(entry_id);
+    state.ui.entry_list.selected_entry_ids.insert(entry_id);
     load_active_entry(state);
     state.set_message(format!("Loaded entry {}", state.current_entry_label()));
 }
@@ -929,9 +935,7 @@ fn delete_entry(state: &mut AppState, entry_id: u64) {
     if state.entries.delete_entry(entry_id) {
         state.ui.entry_viewports.remove(&entry_id);
         state.history.forget_entry(entry_id);
-        if state.ui.entry_list.selected_entry_id == Some(entry_id) {
-            state.ui.entry_list.selected_entry_id = state.entries.active_entry_id();
-        }
+        state.ui.entry_list.selected_entry_ids.remove(&entry_id);
         if state.ui.entry_list.renaming_entry_id == Some(entry_id) {
             state.ui.entry_list.renaming_entry_id = None;
             state.ui.entry_list.rename_buffer.clear();
@@ -943,6 +947,12 @@ fn delete_entry(state: &mut AppState, entry_id: u64) {
         state.set_message(format!("Deleted entry {name}"));
     } else {
         state.set_message("Cannot delete entry".to_string());
+    }
+}
+
+fn delete_entries(state: &mut AppState, ids: Vec<u64>) {
+    for id in ids {
+        delete_entry(state, id);
     }
 }
 
@@ -1005,7 +1015,8 @@ pub fn open_paths(state: &mut AppState, paths: impl IntoIterator<Item = PathBuf>
         return;
     };
 
-    state.ui.entry_list.selected_entry_id = Some(*entry_id);
+    state.ui.entry_list.selected_entry_ids.clear();
+    state.ui.entry_list.selected_entry_ids.insert(*entry_id);
     load_active_entry(state);
     state.ui.selection.clear();
     state.set_message(format_open_results(opened.len(), failed.len(), last_path));
@@ -2283,10 +2294,28 @@ fn rename_group(state: &mut AppState, group_id: &str, new_name: &str) {
 fn delete_group(state: &mut AppState, group_id: &str) {
     if state.entries.delete_group(group_id) {
         state.ui.entry_list.collapsed_group_ids.remove(group_id);
+        if state.ui.entry_list.renaming_group_id.as_deref() == Some(group_id) {
+            state.ui.entry_list.renaming_group_id = None;
+            state.ui.entry_list.rename_group_buffer.clear();
+        }
         state.set_message("Deleted group".to_string());
     } else {
         state.set_message("Cannot delete group".to_string());
     }
+}
+
+fn delete_group_with_entries(state: &mut AppState, group_id: &str) {
+    let ids: Vec<u64> = state
+        .entries
+        .records
+        .iter()
+        .filter(|e| e.group_id == group_id)
+        .map(|e| e.id)
+        .collect();
+    for id in ids {
+        delete_entry(state, id);
+    }
+    delete_group(state, group_id);
 }
 
 fn move_entry_to_group(state: &mut AppState, entry_id: u64, group_id: &str) {

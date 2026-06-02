@@ -184,7 +184,8 @@ fn open_structure_path(state: &mut AppState, path: PathBuf) -> Result<()> {
             .ok_or_else(|| anyhow!("structure file did not contain any models"))?;
     state.entries.activate_entry(entry_id);
     state.history.set_active_entry(Some(entry_id));
-    state.ui.entry_list.selected_entry_id = Some(entry_id);
+    state.ui.entry_list.selected_entry_ids.clear();
+    state.ui.entry_list.selected_entry_ids.insert(entry_id);
     state.ui.selection.clear();
     state.ui.camera = crate::frontend::ViewCamera::default();
     state.ui.viewport_cache.clear();

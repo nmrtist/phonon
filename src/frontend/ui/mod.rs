@@ -11,7 +11,7 @@ use crate::{
         CartoonSectionStyle, LightPreset, SurfaceStyle,
         actions::AppAction,
         services::entry_details,
-        state::{AppState, AtomStyle, EngineDraft, PrimaryView},
+        state::{AppState, AtomStyle, EngineDraft, PrimaryView, SelectionItem},
     },
 };
 
@@ -64,7 +64,9 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
-                state.ui.layout.primary_sidebar_width = ui.available_width();
+                let primary_sidebar_width = ui.available_width();
+                state.ui.layout.primary_sidebar_width = primary_sidebar_width;
+                ui.set_max_width(primary_sidebar_width);
                 render_primary_sidebar(state, ui, actions);
             });
     }
@@ -549,7 +551,18 @@ fn render_activity_bar(state: &mut AppState, ui: &mut egui::Ui) {
 
 fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     ui.horizontal(|ui| {
-        ui.heading(state.ui.layout.active_primary_view.label());
+        let btn_w = 28.0 + ui.spacing().item_spacing.x;
+        let heading_w = (ui.available_width() - btn_w).max(0.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(heading_w, 28.0), Sense::hover());
+        let mut heading_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        heading_ui.add(
+            egui::Label::new(RichText::new(state.ui.layout.active_primary_view.label()).heading())
+                .truncate(),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if with_core_button_style(ui, false, |ui| {
                 ui.add_sized(
@@ -697,6 +710,40 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
             });
     }
 
+    let ordered_items: Vec<SelectionItem> = {
+        let mut items = Vec::new();
+        for group in &groups {
+            let has_visible = state.entries.records.iter().any(|e| {
+                e.group_id == group.id
+                    && (search.is_empty()
+                        || e.name.to_lowercase().contains(&search)
+                        || e.id.to_string().contains(&search))
+            });
+            if has_visible || search.is_empty() {
+                items.push(SelectionItem::Group(group.id.clone()));
+            }
+            if !state.ui.entry_list.collapsed_group_ids.contains(&group.id) {
+                state
+                    .entries
+                    .records
+                    .iter()
+                    .filter(|e| e.group_id == group.id)
+                    .filter(|e| {
+                        search.is_empty()
+                            || e.name.to_lowercase().contains(&search)
+                            || e.id.to_string().contains(&search)
+                    })
+                    .for_each(|e| items.push(SelectionItem::Entry(e.id)));
+            }
+        }
+        items.extend(
+            ungrouped_entries
+                .iter()
+                .map(|(id, _, _)| SelectionItem::Entry(*id)),
+        );
+        items
+    };
+
     ScrollArea::vertical()
         .max_height(ui.available_height().max(120.0))
         .show(ui, |ui| {
@@ -716,95 +763,27 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                     .collect::<Vec<_>>();
                 if entries.is_empty() && search.is_empty() {
                     let collapsed = state.ui.entry_list.collapsed_group_ids.contains(&group.id);
-                    let folder_icon = if collapsed {
-                        egui_phosphor::regular::FOLDER
-                    } else {
-                        egui_phosphor::regular::FOLDER_OPEN
-                    };
-                    let marker = if collapsed {
-                        egui_phosphor::regular::CARET_RIGHT
-                    } else {
-                        egui_phosphor::regular::CARET_DOWN
-                    };
-
-                    let group_header_response = ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 0.0),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            ui.label(
-                                RichText::new(marker)
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(92, 100, 112)),
-                            );
-                            ui.label(
-                                RichText::new(folder_icon)
-                                    .size(14.0)
-                                    .color(egui::Color32::from_rgb(92, 100, 112)),
-                            );
-                            ui.label(RichText::new(&group.name).strong());
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui
-                                    .add_enabled(
-                                        true,
-                                        egui::Button::new(
-                                            RichText::new(
-                                                egui_phosphor::regular::PENCIL_SIMPLE_LINE,
-                                            )
-                                            .size(11.0),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .clicked()
-                                {
-                                    state.ui.entry_list.renaming_group_id = Some(group.id.clone());
-                                    state.ui.entry_list.rename_group_buffer = group.name.clone();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        true,
-                                        egui::Button::new(
-                                            RichText::new(egui_phosphor::regular::TRASH).size(11.0),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .clicked()
-                                {
-                                    actions.push(AppAction::DeleteGroup(group.id.clone()));
-                                }
-                            });
-                            ui.response()
-                        },
-                    );
-
-                    let header_interact = ui.interact(
-                        group_header_response.response.rect,
-                        Id::new(format!("group_header_{}", group.id)),
-                        Sense::click(),
-                    );
-                    if header_interact.clicked()
-                        && !state
-                            .ui
-                            .entry_list
-                            .collapsed_group_ids
-                            .insert(group.id.clone())
+                    if render_group_header(
+                        state,
+                        ui,
+                        actions,
+                        &group.id,
+                        &group.name,
+                        collapsed,
+                        &ordered_items,
+                    ) && !state
+                        .ui
+                        .entry_list
+                        .collapsed_group_ids
+                        .insert(group.id.clone())
                     {
                         state.ui.entry_list.collapsed_group_ids.remove(&group.id);
                     }
-
-                    if state.ui.entry_list.renaming_group_id.as_deref() == Some(group.id.as_str()) {
-                        let response =
-                            ui.text_edit_singleline(&mut state.ui.entry_list.rename_group_buffer);
-                        if response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                        {
-                            actions.push(AppAction::RenameGroup {
-                                group_id: group.id.clone(),
-                                new_name: state.ui.entry_list.rename_group_buffer.clone(),
-                            });
-                        }
-                    }
-
                     if !collapsed {
+                        let ctx = EntryListCtx {
+                            group_choices: &all_group_choices,
+                            ordered_items: &ordered_items,
+                        };
                         for (entry_id, name, entry_group_id) in &entries {
                             render_entry_list_item(
                                 state,
@@ -813,7 +792,7 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                                 *entry_id,
                                 name,
                                 entry_group_id,
-                                &all_group_choices,
+                                &ctx,
                             );
                         }
                     }
@@ -825,93 +804,28 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                 }
 
                 let collapsed = state.ui.entry_list.collapsed_group_ids.contains(&group.id);
-                let folder_icon = if collapsed {
-                    egui_phosphor::regular::FOLDER
-                } else {
-                    egui_phosphor::regular::FOLDER_OPEN
-                };
-                let marker = if collapsed {
-                    egui_phosphor::regular::CARET_RIGHT
-                } else {
-                    egui_phosphor::regular::CARET_DOWN
-                };
-
-                let group_header_response = ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), 0.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.label(
-                            RichText::new(marker)
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(92, 100, 112)),
-                        );
-                        ui.label(
-                            RichText::new(folder_icon)
-                                .size(14.0)
-                                .color(egui::Color32::from_rgb(92, 100, 112)),
-                        );
-                        ui.label(RichText::new(&group.name).strong());
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .add_enabled(
-                                    true,
-                                    egui::Button::new(
-                                        RichText::new(egui_phosphor::regular::PENCIL_SIMPLE_LINE)
-                                            .size(11.0),
-                                    )
-                                    .frame(false),
-                                )
-                                .clicked()
-                            {
-                                state.ui.entry_list.renaming_group_id = Some(group.id.clone());
-                                state.ui.entry_list.rename_group_buffer = group.name.clone();
-                            }
-                            if ui
-                                .add_enabled(
-                                    true,
-                                    egui::Button::new(
-                                        RichText::new(egui_phosphor::regular::TRASH).size(11.0),
-                                    )
-                                    .frame(false),
-                                )
-                                .clicked()
-                            {
-                                actions.push(AppAction::DeleteGroup(group.id.clone()));
-                            }
-                        });
-                        ui.response()
-                    },
-                );
-
-                let header_interact = ui.interact(
-                    group_header_response.response.rect,
-                    Id::new(format!("group_header_{}", group.id)),
-                    Sense::click(),
-                );
-                if header_interact.clicked()
-                    && !state
-                        .ui
-                        .entry_list
-                        .collapsed_group_ids
-                        .insert(group.id.clone())
+                if render_group_header(
+                    state,
+                    ui,
+                    actions,
+                    &group.id,
+                    &group.name,
+                    collapsed,
+                    &ordered_items,
+                ) && !state
+                    .ui
+                    .entry_list
+                    .collapsed_group_ids
+                    .insert(group.id.clone())
                 {
                     state.ui.entry_list.collapsed_group_ids.remove(&group.id);
                 }
 
-                if state.ui.entry_list.renaming_group_id.as_deref() == Some(group.id.as_str()) {
-                    let response =
-                        ui.text_edit_singleline(&mut state.ui.entry_list.rename_group_buffer);
-                    if response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    {
-                        actions.push(AppAction::RenameGroup {
-                            group_id: group.id.clone(),
-                            new_name: state.ui.entry_list.rename_group_buffer.clone(),
-                        });
-                    }
-                }
-
                 if !collapsed {
+                    let ctx = EntryListCtx {
+                        group_choices: &all_group_choices,
+                        ordered_items: &ordered_items,
+                    };
                     for (entry_id, name, entry_group_id) in &entries {
                         render_entry_list_item(
                             state,
@@ -920,7 +834,7 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                             *entry_id,
                             name,
                             entry_group_id,
-                            &all_group_choices,
+                            &ctx,
                         );
                     }
                 }
@@ -931,18 +845,357 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                 ui.separator();
             }
 
+            let ctx = EntryListCtx {
+                group_choices: &all_group_choices,
+                ordered_items: &ordered_items,
+            };
             for (entry_id, name, group_id) in &ungrouped_entries {
-                render_entry_list_item(
-                    state,
-                    ui,
-                    actions,
-                    *entry_id,
-                    name,
-                    group_id,
-                    &all_group_choices,
-                );
+                render_entry_list_item(state, ui, actions, *entry_id, name, group_id, &ctx);
             }
         });
+}
+
+fn render_group_header(
+    state: &mut AppState,
+    ui: &mut egui::Ui,
+    actions: &mut Vec<AppAction>,
+    group_id: &str,
+    group_name: &str,
+    collapsed: bool,
+    ordered_items: &[SelectionItem],
+) -> bool {
+    let is_selected = state.ui.entry_list.selected_group_ids.contains(group_id);
+    let folder_icon = if collapsed {
+        egui_phosphor::regular::FOLDER
+    } else {
+        egui_phosphor::regular::FOLDER_OPEN
+    };
+    let marker = if collapsed {
+        egui_phosphor::regular::CARET_RIGHT
+    } else {
+        egui_phosphor::regular::CARET_DOWN
+    };
+
+    let row_h = 22.0;
+    let full_w = ui.available_width();
+    let btn_w = 44.0;
+    let left_w = (full_w - btn_w).max(0.0);
+
+    let is_renaming = state.ui.entry_list.renaming_group_id.as_deref() == Some(group_id);
+
+    // The whole row is the click target for selection and the collapse toggle.
+    // Icons and name are painted directly so nothing overlaps it; only the
+    // action buttons are real widgets, registered later so their rects win.
+    // While renaming the row is hover-only and the text editor owns clicks.
+    let sense = if is_renaming {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
+    let (row_rect, row_resp) = ui.allocate_exact_size(egui::vec2(full_w, row_h), sense);
+    let right_rect = egui::Rect::from_min_size(
+        egui::pos2(row_rect.max.x - btn_w, row_rect.min.y),
+        egui::vec2(btn_w, row_h),
+    );
+
+    // Background (selection or hover).
+    let bg = if is_selected {
+        egui::Color32::from_rgba_unmultiplied(54, 97, 164, 40)
+    } else if row_resp.hovered() {
+        egui::Color32::from_rgba_unmultiplied(70, 78, 88, 18)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    if bg != egui::Color32::TRANSPARENT {
+        ui.painter().rect_filled(row_rect, 0.0, bg);
+    }
+
+    // Paint the caret marker and folder icon.
+    let icon_color = egui::Color32::from_rgb(92, 100, 112);
+    let mut x = row_rect.left() + 4.0;
+    let marker_galley = ui.painter().layout_no_wrap(
+        marker.to_string(),
+        egui::FontId::proportional(11.0),
+        icon_color,
+    );
+    let marker_w = marker_galley.size().x;
+    ui.painter().galley(
+        egui::pos2(x, row_rect.center().y - marker_galley.size().y / 2.0),
+        marker_galley,
+        icon_color,
+    );
+    x += marker_w + 4.0;
+    let folder_galley = ui.painter().layout_no_wrap(
+        folder_icon.to_string(),
+        egui::FontId::proportional(14.0),
+        icon_color,
+    );
+    let folder_w = folder_galley.size().x;
+    ui.painter().galley(
+        egui::pos2(x, row_rect.center().y - folder_galley.size().y / 2.0),
+        folder_galley,
+        icon_color,
+    );
+    x += folder_w + 6.0;
+
+    // Name, or the in-place rename editor occupying the name's original slot.
+    let mut rename_done = false;
+    if is_renaming {
+        let edit_rect = egui::Rect::from_min_max(
+            egui::pos2(x, row_rect.min.y),
+            egui::pos2(row_rect.left() + left_w, row_rect.max.y),
+        );
+        let mut edit_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(edit_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let resp = edit_ui.add(
+            egui::TextEdit::singleline(&mut state.ui.entry_list.rename_group_buffer)
+                .desired_width(f32::INFINITY),
+        );
+        if !state.ui.entry_list.rename_group_focus_requested {
+            resp.request_focus();
+            state.ui.entry_list.rename_group_focus_requested = true;
+        }
+        // Commit on Enter; cancel on any other focus loss (e.g. click away).
+        if resp.lost_focus() {
+            if edit_ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                actions.push(AppAction::RenameGroup {
+                    group_id: group_id.to_string(),
+                    new_name: state.ui.entry_list.rename_group_buffer.clone(),
+                });
+            }
+            rename_done = true;
+        }
+    } else {
+        let name_color = egui::Color32::from_rgb(32, 37, 43);
+        let avail = (row_rect.left() + left_w - x).max(0.0);
+        let mut job = egui::text::LayoutJob::single_section(
+            group_name.to_string(),
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(13.0),
+                color: name_color,
+                ..Default::default()
+            },
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: avail,
+            max_rows: 1,
+            overflow_character: Some('…'),
+            break_anywhere: true,
+        };
+        let galley = ui.painter().fonts_mut(|f| f.layout_job(job));
+        ui.painter().galley(
+            egui::pos2(x, row_rect.center().y - galley.size().y / 2.0),
+            galley,
+            name_color,
+        );
+    }
+    if rename_done {
+        state.ui.entry_list.renaming_group_id = None;
+        state.ui.entry_list.rename_group_focus_requested = false;
+    }
+
+    // Edit / delete buttons in the right area.
+    let (btn_pencil, btn_trash) = {
+        let mut right_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(right_rect)
+                .layout(Layout::right_to_left(Align::Center)),
+        );
+        let trash = right_ui
+            .add(
+                egui::Button::new(RichText::new(egui_phosphor::regular::TRASH).size(11.0))
+                    .frame(false),
+            )
+            .clicked();
+        let pencil = right_ui
+            .add(
+                egui::Button::new(
+                    RichText::new(egui_phosphor::regular::PENCIL_SIMPLE_LINE).size(11.0),
+                )
+                .frame(false),
+            )
+            .clicked();
+        (pencil, trash)
+    };
+
+    if btn_pencil {
+        state.ui.entry_list.renaming_group_id = Some(group_id.to_string());
+        state.ui.entry_list.rename_group_buffer = group_name.to_string();
+        state.ui.entry_list.rename_group_focus_requested = false;
+    }
+    if btn_trash {
+        actions.push(AppAction::DeleteGroup(group_id.to_string()));
+    }
+
+    // Pre-collect selection state for the context-menu closure.
+    let sel_entry_ids: Vec<u64> = state
+        .ui
+        .entry_list
+        .selected_entry_ids
+        .iter()
+        .copied()
+        .collect();
+    let sel_group_ids: Vec<String> = state
+        .ui
+        .entry_list
+        .selected_group_ids
+        .iter()
+        .cloned()
+        .collect();
+    row_resp.context_menu(|ui| {
+        if ui.button("Rename").clicked() {
+            state.ui.entry_list.renaming_group_id = Some(group_id.to_string());
+            state.ui.entry_list.rename_group_buffer = group_name.to_string();
+            ui.close();
+        }
+        ui.separator();
+        render_delete_menu_items(
+            ui,
+            actions,
+            &sel_entry_ids,
+            &sel_group_ids,
+            None,
+            Some(group_id),
+        );
+    });
+
+    // Handle selection on plain left-click (not a button click).
+    if !btn_pencil && !btn_trash && row_resp.clicked() {
+        let shift = ui.input(|i| i.modifiers.shift);
+        let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let this = SelectionItem::Group(group_id.to_string());
+
+        if shift {
+            let anchor_pos = state
+                .ui
+                .entry_list
+                .selection_anchor
+                .as_ref()
+                .and_then(|a| ordered_items.iter().position(|item| item == a));
+            let current_pos = ordered_items.iter().position(|item| item == &this);
+            if let (Some(a), Some(b)) = (anchor_pos, current_pos) {
+                let (lo, hi) = (a.min(b), a.max(b));
+                state.ui.entry_list.selected_entry_ids.clear();
+                state.ui.entry_list.selected_group_ids.clear();
+                for item in &ordered_items[lo..=hi] {
+                    match item {
+                        SelectionItem::Entry(id) => {
+                            state.ui.entry_list.selected_entry_ids.insert(*id);
+                        }
+                        SelectionItem::Group(id) => {
+                            state.ui.entry_list.selected_group_ids.insert(id.clone());
+                        }
+                    }
+                }
+            } else {
+                state.ui.entry_list.selected_entry_ids.clear();
+                state.ui.entry_list.selected_group_ids.clear();
+                state
+                    .ui
+                    .entry_list
+                    .selected_group_ids
+                    .insert(group_id.to_string());
+                state.ui.entry_list.selection_anchor = Some(this);
+            }
+        } else if ctrl {
+            if !state.ui.entry_list.selected_group_ids.remove(group_id) {
+                state
+                    .ui
+                    .entry_list
+                    .selected_group_ids
+                    .insert(group_id.to_string());
+            }
+            state.ui.entry_list.selection_anchor = Some(this);
+        } else {
+            state.ui.entry_list.selected_entry_ids.clear();
+            state.ui.entry_list.selected_group_ids.clear();
+            state
+                .ui
+                .entry_list
+                .selected_group_ids
+                .insert(group_id.to_string());
+            state.ui.entry_list.selection_anchor = Some(this);
+        }
+
+        return !shift && !ctrl;
+    }
+
+    false
+}
+
+fn render_delete_menu_items(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<AppAction>,
+    sel_entry_ids: &[u64],
+    sel_group_ids: &[String],
+    focused_entry_id: Option<u64>,
+    focused_group_id: Option<&str>,
+) {
+    let n_entries = sel_entry_ids.len();
+    let n_groups = sel_group_ids.len();
+
+    if n_entries == 0 && n_groups == 0 {
+        if let Some(eid) = focused_entry_id {
+            if ui.button("Delete Entry").clicked() {
+                actions.push(AppAction::DeleteEntry(eid));
+                ui.close();
+            }
+        } else if let Some(gid) = focused_group_id {
+            if ui.button("Ungroup").clicked() {
+                actions.push(AppAction::DeleteGroup(gid.to_string()));
+                ui.close();
+            }
+            if ui.button("Delete Group and All Entries").clicked() {
+                actions.push(AppAction::DeleteGroupWithEntries(gid.to_string()));
+                ui.close();
+            }
+        }
+        return;
+    }
+
+    if n_entries > 0 {
+        let lbl = if n_entries == 1 {
+            "Delete 1 Entry".to_string()
+        } else {
+            format!("Delete {} Entries", n_entries)
+        };
+        if ui.button(lbl).clicked() {
+            actions.push(AppAction::DeleteEntries(sel_entry_ids.to_vec()));
+            ui.close();
+        }
+    }
+    if n_groups > 0 {
+        let lbl = if n_groups == 1 {
+            "Ungroup 1 Group".to_string()
+        } else {
+            format!("Ungroup {} Groups", n_groups)
+        };
+        if ui.button(lbl).clicked() {
+            for gid in sel_group_ids {
+                actions.push(AppAction::DeleteGroup(gid.clone()));
+            }
+            ui.close();
+        }
+        let lbl2 = if n_groups == 1 {
+            "Delete 1 Group and Its Entries".to_string()
+        } else {
+            format!("Delete {} Groups and Their Entries", n_groups)
+        };
+        if ui.button(lbl2).clicked() {
+            for gid in sel_group_ids {
+                actions.push(AppAction::DeleteGroupWithEntries(gid.clone()));
+            }
+            ui.close();
+        }
+    }
+}
+
+struct EntryListCtx<'a> {
+    group_choices: &'a [(String, String)],
+    ordered_items: &'a [SelectionItem],
 }
 
 fn render_entry_list_item(
@@ -952,9 +1205,10 @@ fn render_entry_list_item(
     entry_id: u64,
     name: &str,
     group_id: &str,
-    all_group_choices: &[(String, String)],
+    ctx: &EntryListCtx<'_>,
 ) {
-    let active = state.ui.entry_list.selected_entry_id == Some(entry_id);
+    let is_workspace_active = state.entries.active_entry_id() == Some(entry_id);
+    let is_selected = state.ui.entry_list.selected_entry_ids.contains(&entry_id);
     let renaming = state.ui.entry_list.renaming_entry_id == Some(entry_id);
 
     if renaming {
@@ -978,41 +1232,110 @@ fn render_entry_list_item(
             ui.allocate_at_least(egui::vec2(full_width, 20.0), Sense::click_and_drag());
 
         let hovered = response.hovered();
-        let bg_fill = if active {
+        let bg_fill = if is_workspace_active {
+            egui::Color32::from_rgba_unmultiplied(54, 97, 164, 80)
+        } else if is_selected {
             egui::Color32::from_rgba_unmultiplied(54, 97, 164, 40)
         } else if hovered {
             egui::Color32::from_rgba_unmultiplied(70, 78, 88, 18)
         } else {
             egui::Color32::TRANSPARENT
         };
-        let text_color = if active {
+        let text_color = if is_workspace_active {
+            egui::Color32::from_rgb(18, 22, 30)
+        } else if is_selected {
             egui::Color32::from_rgb(32, 37, 43)
         } else {
             egui::Color32::from_rgb(70, 78, 88)
         };
 
         ui.painter().rect_filled(rect, 0.0, bg_fill);
-        let text_rect = rect.shrink2(egui::vec2(6.0, 0.0));
-        ui.painter().text(
-            text_rect.left_center(),
-            egui::Align2::LEFT_CENTER,
-            name,
-            egui::FontId::proportional(13.0),
-            text_color,
-        );
 
-        if response.clicked() {
-            if state.ui.entry_list.selected_entry_id == Some(entry_id) {
-                state.ui.entry_list.selected_entry_id = None;
+        let text_rect = rect.shrink2(egui::vec2(6.0, 0.0));
+        let mut job = egui::text::LayoutJob::single_section(
+            name.to_string(),
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(13.0),
+                color: text_color,
+                ..Default::default()
+            },
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: text_rect.width(),
+            max_rows: 1,
+            overflow_character: Some('…'),
+            break_anywhere: true,
+        };
+        let galley = ui.painter().fonts_mut(|f| f.layout_job(job));
+        let galley_pos = egui::pos2(
+            text_rect.left(),
+            text_rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(galley_pos, galley, text_color);
+
+        if response.double_clicked() {
+            actions.push(AppAction::ActivateEntry(entry_id));
+            state.ui.entry_list.selected_entry_ids.insert(entry_id);
+        } else if response.clicked() {
+            let shift = ui.input(|i| i.modifiers.shift);
+            let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+
+            let this = SelectionItem::Entry(entry_id);
+            if shift {
+                let anchor_pos = state
+                    .ui
+                    .entry_list
+                    .selection_anchor
+                    .as_ref()
+                    .and_then(|a| ctx.ordered_items.iter().position(|item| item == a));
+                let current_pos = ctx.ordered_items.iter().position(|item| item == &this);
+                if let (Some(a), Some(b)) = (anchor_pos, current_pos) {
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    state.ui.entry_list.selected_entry_ids.clear();
+                    state.ui.entry_list.selected_group_ids.clear();
+                    for item in &ctx.ordered_items[lo..=hi] {
+                        match item {
+                            SelectionItem::Entry(id) => {
+                                state.ui.entry_list.selected_entry_ids.insert(*id);
+                            }
+                            SelectionItem::Group(id) => {
+                                state.ui.entry_list.selected_group_ids.insert(id.clone());
+                            }
+                        }
+                    }
+                } else {
+                    state.ui.entry_list.selected_entry_ids.clear();
+                    state.ui.entry_list.selected_group_ids.clear();
+                    state.ui.entry_list.selected_entry_ids.insert(entry_id);
+                    state.ui.entry_list.selection_anchor = Some(this);
+                }
+            } else if ctrl {
+                if !state.ui.entry_list.selected_entry_ids.remove(&entry_id) {
+                    state.ui.entry_list.selected_entry_ids.insert(entry_id);
+                }
+                state.ui.entry_list.selection_anchor = Some(this);
             } else {
-                state.ui.entry_list.selected_entry_id = Some(entry_id);
-                actions.push(AppAction::ActivateEntry(entry_id));
+                state.ui.entry_list.selected_entry_ids.clear();
+                state.ui.entry_list.selected_group_ids.clear();
+                state.ui.entry_list.selected_entry_ids.insert(entry_id);
+                state.ui.entry_list.selection_anchor = Some(this);
             }
         }
-        if response.double_clicked() {
-            state.ui.entry_list.renaming_entry_id = Some(entry_id);
-            state.ui.entry_list.rename_buffer = name.to_string();
-        }
+
+        let sel_entry_ids: Vec<u64> = state
+            .ui
+            .entry_list
+            .selected_entry_ids
+            .iter()
+            .copied()
+            .collect();
+        let sel_group_ids: Vec<String> = state
+            .ui
+            .entry_list
+            .selected_group_ids
+            .iter()
+            .cloned()
+            .collect();
         response.context_menu(|ui| {
             if ui.button("Rename").clicked() {
                 state.ui.entry_list.renaming_entry_id = Some(entry_id);
@@ -1026,10 +1349,10 @@ fn render_entry_list_item(
                 });
                 ui.close();
             }
-            if !all_group_choices.is_empty() {
+            if !ctx.group_choices.is_empty() {
                 ui.separator();
                 ui.label("Move to group");
-                for (target_group_id, target_group_name) in all_group_choices {
+                for (target_group_id, target_group_name) in ctx.group_choices {
                     if target_group_id == group_id {
                         continue;
                     }
@@ -1043,10 +1366,14 @@ fn render_entry_list_item(
                 }
             }
             ui.separator();
-            if ui.button("Delete Entry").clicked() {
-                actions.push(AppAction::DeleteEntry(entry_id));
-                ui.close();
-            }
+            render_delete_menu_items(
+                ui,
+                actions,
+                &sel_entry_ids,
+                &sel_group_ids,
+                Some(entry_id),
+                None,
+            );
         });
     }
     ui.add_space(2.0);

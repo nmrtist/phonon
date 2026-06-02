@@ -70,10 +70,19 @@ impl PanelTab {
     }
 }
 
+/// An item in the sidebar list that can be selected: either an entry or a group header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionItem {
+    Entry(u64),
+    Group(String),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EntryListState {
     pub search_query: String,
-    pub selected_entry_id: Option<u64>,
+    pub selected_entry_ids: std::collections::BTreeSet<u64>,
+    pub selected_group_ids: std::collections::BTreeSet<String>,
+    pub selection_anchor: Option<SelectionItem>,
     pub collapsed_group_ids: std::collections::BTreeSet<String>,
     pub renaming_entry_id: Option<u64>,
     pub rename_buffer: String,
@@ -81,6 +90,9 @@ pub struct EntryListState {
     pub new_group_name: String,
     pub renaming_group_id: Option<String>,
     pub rename_group_buffer: String,
+    /// Set once focus is handed to the group rename editor, so it is requested
+    /// only on the first frame of a rename.
+    pub rename_group_focus_requested: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,7 +115,7 @@ impl Default for LayoutState {
             show_primary_sidebar: true,
             show_secondary_sidebar: false,
             show_panel: true,
-            primary_sidebar_width: 300.0,
+            primary_sidebar_width: 240.0,
             secondary_sidebar_width: 320.0,
             panel_height: 180.0,
         }
@@ -832,7 +844,10 @@ impl AppState {
                 .set_active_entry(state.entries.active_entry_id());
         }
         state.load_viewport_for_active_entry();
-        state.ui.entry_list.selected_entry_id = state.entries.active_entry_id();
+        state.ui.entry_list.selected_entry_ids.clear();
+        if let Some(id) = state.entries.active_entry_id() {
+            state.ui.entry_list.selected_entry_ids.insert(id);
+        }
         state
             .history
             .set_active_entry(state.entries.active_entry_id());

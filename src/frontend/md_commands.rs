@@ -511,7 +511,8 @@ fn activate_entry(state: &mut AppState, entry_id: u64) {
     state.entries.activate_entry(entry_id);
     state.ensure_entry_loaded(entry_id);
     state.history.set_active_entry(Some(entry_id));
-    state.ui.entry_list.selected_entry_id = Some(entry_id);
+    state.ui.entry_list.selected_entry_ids.clear();
+    state.ui.entry_list.selected_entry_ids.insert(entry_id);
     state.load_viewport_for_active_entry();
 }
 

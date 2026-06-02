@@ -313,15 +313,10 @@ impl EntryStore {
         let Some(index) = self.groups.iter().position(|group| group.id == group_id) else {
             return false;
         };
-        let fallback_group_id = self
-            .groups
-            .iter()
-            .find(|group| group.id != group_id)
-            .map(|group| group.id.clone())
-            .unwrap_or_default();
+        // Entries in the deleted group become ungrouped, not reassigned.
         for entry in &mut self.records {
             if entry.group_id == group_id {
-                entry.group_id = fallback_group_id.clone();
+                entry.group_id.clear();
             }
         }
         self.groups.remove(index);
