@@ -19,10 +19,7 @@ pub fn run(structure: Structure, source_path: Option<PathBuf>) -> Result<()> {
         vsync: true,
         multisampling: 0,
         wgpu_options: low_power_wgpu_options(),
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([860.0, 560.0])
-            .with_decorations(false),
+        viewport: window_viewport(),
         ..Default::default()
     };
 
@@ -32,11 +29,41 @@ pub fn run(structure: Structure, source_path: Option<PathBuf>) -> Result<()> {
         Box::new(|cc| {
             let mut fonts = egui::FontDefinitions::default();
             egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+            install_system_fonts(&mut fonts);
             cc.egui_ctx.set_fonts(fonts);
+            crate::frontend::theme::apply(&cc.egui_ctx);
             Ok(Box::new(PhononApp::new(structure, source_path)))
         }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+/// Build the main window's viewport.
+///
+/// On macOS we use the *native* window frame — standard traffic-light buttons,
+/// continuous-curvature (squircle) corners, and the system drop shadow — via a
+/// transparent titlebar plus a full-size content view, so our custom title bar
+/// draws behind the native buttons.
+/// Windows/Linux keep a borderless, transparent window with app-drawn chrome
+/// (custom controls, rounded corners, resize handles).
+fn window_viewport() -> egui::ViewportBuilder {
+    let viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1180.0, 760.0])
+        .with_min_inner_size([860.0, 560.0]);
+
+    #[cfg(target_os = "macos")]
+    {
+        viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_titlebar_buttons_shown(true)
+            .with_has_shadow(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        viewport.with_decorations(false).with_transparent(true)
+    }
 }
 
 fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
@@ -46,6 +73,38 @@ fn low_power_wgpu_options() -> egui_wgpu::WgpuConfiguration {
             wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower);
     }
     options
+}
+
+/// On macOS, prefer the system font (SF Pro for UI text, SF Mono for code) so
+/// the interface reads as native. Falls back silently to egui's bundled fonts
+/// on other platforms or if the system files are unavailable.
+fn install_system_fonts(fonts: &mut egui::FontDefinitions) {
+    #[cfg(target_os = "macos")]
+    {
+        let mut install = |name: &str, path: &str, family: egui::FontFamily| {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    name.to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                if let Some(list) = fonts.families.get_mut(&family) {
+                    list.insert(0, name.to_owned());
+                }
+            }
+        };
+        install(
+            "SF Pro",
+            "/System/Library/Fonts/SFNS.ttf",
+            egui::FontFamily::Proportional,
+        );
+        install(
+            "SF Mono",
+            "/System/Library/Fonts/SFNSMono.ttf",
+            egui::FontFamily::Monospace,
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = fonts;
 }
 
 pub struct PhononApp {
@@ -185,5 +244,22 @@ impl eframe::App for PhononApp {
         }
         dispatcher::flush_pending_autosave(&mut self.state, &ctx);
         self.state.record_message_change();
+    }
+
+    /// Backing color behind the UI.
+    ///
+    /// macOS backing is opaque and matched to the central panel fill, so the
+    /// native title bar shows no seam and the native shadow stays intact. Other
+    /// platforms use a transparent backing so the app-drawn rounded corners read
+    /// as empty (revealing the desktop behind them).
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        #[cfg(target_os = "macos")]
+        {
+            crate::frontend::theme::CENTRAL_PANEL_FILL.to_normalized_gamma_f32()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            [0.0, 0.0, 0.0, 0.0]
+        }
     }
 }

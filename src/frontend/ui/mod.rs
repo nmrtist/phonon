@@ -22,15 +22,45 @@ mod workspace;
 use bottom_panel::render_status_bar;
 use secondary_sidebar::render_secondary_sidebar;
 use workspace::render_workspace;
+/// Corner radius of the *borderless* main window, in logical points.
+///
+/// Window-chrome model (the reason for the `cfg`s throughout this file):
+/// Windows/Linux run a borderless, transparent window and draw their own chrome
+/// — resize handles, rounded title/status-bar corners, and a hairline border.
+/// macOS uses the native window frame, which owns resize, the squircle corners,
+/// the border, and the shadow, so the app-drawn chrome is skipped there.
+#[cfg(not(target_os = "macos"))]
+const WINDOW_CORNER_RADIUS: u8 = 10;
+
 pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let ctx = ui.ctx().clone();
+
     render_window_resize_handles(&ctx);
+
+    #[cfg(target_os = "macos")]
+    let (top_corners, bottom_corners) = (egui::CornerRadius::ZERO, egui::CornerRadius::ZERO);
+    #[cfg(not(target_os = "macos"))]
+    let (top_corners, bottom_corners) = (
+        egui::CornerRadius {
+            nw: WINDOW_CORNER_RADIUS,
+            ne: WINDOW_CORNER_RADIUS,
+            sw: 0,
+            se: 0,
+        },
+        egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: WINDOW_CORNER_RADIUS,
+            se: WINDOW_CORNER_RADIUS,
+        },
+    );
 
     egui::Panel::top("title_bar")
         .exact_size(32.0)
         .frame(
             Frame::default()
                 .fill(egui::Color32::from_rgb(246, 248, 251))
+                .corner_radius(top_corners)
                 .inner_margin(Margin::symmetric(8, 3)),
         )
         .show_inside(ui, |ui| render_title_bar(state, ui, actions));
@@ -40,6 +70,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         .frame(
             Frame::default()
                 .fill(egui::Color32::from_rgb(229, 236, 244))
+                .corner_radius(bottom_corners)
                 .inner_margin(Margin::symmetric(10, 3)),
         )
         .show_inside(ui, |ui| render_status_bar(state, ui));
@@ -90,10 +121,21 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
     egui::CentralPanel::default()
         .frame(
             Frame::default()
-                .fill(egui::Color32::from_rgb(245, 247, 249))
+                .fill(crate::frontend::theme::CENTRAL_PANEL_FILL)
                 .inner_margin(Margin::same(0)),
         )
         .show_inside(ui, |ui| render_workspace(state, ui, actions));
+
+    // Hairline border hugging the rounded window. Painted last so it sits atop
+    // the panel fills; `StrokeKind::Inside` keeps the full 1px within the window
+    // so it isn't clipped at the physical edge.
+    #[cfg(not(target_os = "macos"))]
+    ui.painter().rect_stroke(
+        ctx.viewport_rect(),
+        egui::CornerRadius::same(WINDOW_CORNER_RADIUS),
+        ctx.global_style().visuals.window_stroke,
+        egui::StrokeKind::Inside,
+    );
 
     render_structure_editor_window(state, actions, &ctx);
     render_pdb_fetch_window(state, actions, &ctx);
@@ -103,6 +145,13 @@ const WINDOW_RESIZE_HANDLE_THICKNESS: f32 = 6.0;
 const WINDOW_RESIZE_CORNER_SIZE: f32 = 18.0;
 
 fn render_window_resize_handles(ctx: &egui::Context) {
+    // Runtime guard rather than a cfg'd call site: this keeps the helper types
+    // below referenced on macOS (which has no app-drawn handles) so they don't
+    // trip dead-code warnings.
+    if cfg!(target_os = "macos") {
+        return;
+    }
+
     let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
     if maximized {
         return;
@@ -254,6 +303,8 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
 
     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
+        // Omitted on macOS, where the native traffic-light buttons sit here.
+        #[cfg(not(target_os = "macos"))]
         ui.label(
             RichText::new("Phonon")
                 .strong()
@@ -898,16 +949,17 @@ fn render_group_header(
         egui::vec2(btn_w, row_h),
     );
 
-    // Background (selection or hover).
+    // Background (selection or hover): a rounded, inset, filled highlight.
     let bg = if is_selected {
         egui::Color32::from_rgba_unmultiplied(54, 97, 164, 40)
     } else if row_resp.hovered() {
-        egui::Color32::from_rgba_unmultiplied(70, 78, 88, 18)
+        egui::Color32::from_rgba_unmultiplied(64, 70, 82, 30)
     } else {
         egui::Color32::TRANSPARENT
     };
     if bg != egui::Color32::TRANSPARENT {
-        ui.painter().rect_filled(row_rect, 0.0, bg);
+        ui.painter()
+            .rect_filled(row_rect.shrink2(egui::vec2(4.0, 1.0)), 6.0, bg);
     }
 
     // Paint the caret marker and folder icon.
@@ -1237,7 +1289,7 @@ fn render_entry_list_item(
         } else if is_selected {
             egui::Color32::from_rgba_unmultiplied(54, 97, 164, 40)
         } else if hovered {
-            egui::Color32::from_rgba_unmultiplied(70, 78, 88, 18)
+            egui::Color32::from_rgba_unmultiplied(64, 70, 82, 30)
         } else {
             egui::Color32::TRANSPARENT
         };
@@ -1249,7 +1301,8 @@ fn render_entry_list_item(
             egui::Color32::from_rgb(70, 78, 88)
         };
 
-        ui.painter().rect_filled(rect, 0.0, bg_fill);
+        ui.painter()
+            .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 6.0, bg_fill);
 
         let text_rect = rect.shrink2(egui::vec2(6.0, 0.0));
         let mut job = egui::text::LayoutJob::single_section(
