@@ -46,6 +46,7 @@ pub(super) fn render_workspace(
                         visual_state: &ui_state.viewport,
                         previous_hovered_atom: ui_state.hovered_atom,
                         cache: &mut ui_state.viewport_cache,
+                        gpu_ready: ui_state.gpu_ready,
                         empty_state_hint: None,
                     },
                 );
@@ -90,6 +91,7 @@ pub(super) fn render_workspace(
                         visual_state: &ui_state.viewport,
                         previous_hovered_atom: ui_state.hovered_atom,
                         cache: &mut ui_state.viewport_cache,
+                        gpu_ready: ui_state.gpu_ready,
                         empty_state_hint: state.entries.tabs.is_empty().then_some(
                             "Open a structure from File > Open, or drag and drop one here.",
                         ),

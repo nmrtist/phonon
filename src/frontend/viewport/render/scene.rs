@@ -51,6 +51,29 @@ pub(crate) fn cached_geometry<'a>(
         .expect("viewport cache geometry must be initialized")
 }
 
+/// Project just the atom centers into pick targets, skipping bond building and
+/// depth sorting. Used by the GPU path, where the heavy geometry lives on the
+/// GPU and the CPU only needs atom screen positions for hover/click picking.
+pub(crate) fn project_pick_targets(
+    structure: &Structure,
+    viewport: &Projector,
+) -> Vec<RenderedAtom> {
+    structure
+        .atoms
+        .iter()
+        .enumerate()
+        .map(|(index, atom)| {
+            let projected = viewport.project(atom.position);
+            RenderedAtom {
+                depth: projected.depth,
+                index,
+                pos: projected.pos,
+                scale: projected.scale,
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn build_viewport_geometry(
     structure: &Structure,
     viewport: &Projector,
@@ -158,6 +181,52 @@ fn projected_bond_segments(
         });
     }
 
+    segments
+}
+
+/// A bond rendered as a world-space line segment, with the atom whose color
+/// applies at each end. Camera-independent — used to build GPU cylinder
+/// instances that survive rotation without a rebuild. Periodic bonds that cross
+/// a cell boundary become two half-segments, each reaching from its atom to the
+/// midpoint of the wrapped bond (mirroring [`projected_bond_segments`]).
+#[derive(Clone, Copy)]
+pub(crate) struct BondWorldSegment {
+    pub(crate) start: Point3<f32>,
+    pub(crate) end: Point3<f32>,
+    pub(crate) start_atom: usize,
+    pub(crate) end_atom: usize,
+}
+
+pub(crate) fn bond_world_segments(structure: &Structure) -> Vec<BondWorldSegment> {
+    let mut segments = Vec::with_capacity(structure.bonds.len());
+    for bond in &structure.bonds {
+        let start = structure.atoms[bond.a].position;
+        let end = structure.atoms[bond.b].position;
+        if let Some(cell) = &structure.cell {
+            let (delta, crosses_boundary) = periodic_bond_delta(cell, start, end);
+            if crosses_boundary {
+                segments.push(BondWorldSegment {
+                    start,
+                    end: Point3::from(start.coords + delta * 0.5),
+                    start_atom: bond.a,
+                    end_atom: bond.b,
+                });
+                segments.push(BondWorldSegment {
+                    start: end,
+                    end: Point3::from(end.coords - delta * 0.5),
+                    start_atom: bond.b,
+                    end_atom: bond.a,
+                });
+                continue;
+            }
+        }
+        segments.push(BondWorldSegment {
+            start,
+            end,
+            start_atom: bond.a,
+            end_atom: bond.b,
+        });
+    }
     segments
 }
 

@@ -18,6 +18,10 @@ pub fn run(structure: Structure, source_path: Option<PathBuf>) -> Result<()> {
         // Keep the GUI paced for tooling workloads instead of chasing high-refresh displays.
         vsync: true,
         multisampling: 0,
+        // A depth buffer for egui's render pass, so the GPU molecule renderer can
+        // depth-test impostors against it. 32 bits → `Depth32Float`, matched by
+        // `viewport::gpu::DEPTH_FORMAT`.
+        depth_buffer: 32,
         wgpu_options: low_power_wgpu_options(),
         viewport: window_viewport(),
         ..Default::default()
@@ -32,7 +36,12 @@ pub fn run(structure: Structure, source_path: Option<PathBuf>) -> Result<()> {
             install_system_fonts(&mut fonts);
             cc.egui_ctx.set_fonts(fonts);
             crate::frontend::theme::apply(&cc.egui_ctx);
-            Ok(Box::new(PhononApp::new(structure, source_path)))
+            let mut app = PhononApp::new(structure, source_path);
+            if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+                crate::frontend::viewport::init_gpu_renderer(render_state);
+                app.state.ui.gpu_ready = true;
+            }
+            Ok(Box::new(app))
         }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))

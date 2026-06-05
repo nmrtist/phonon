@@ -162,7 +162,7 @@ pub fn build_biopolymer(
 
 /// Broad chemical class of an atom, used for "quick select" of all atoms of a
 /// kind (protein, solvent, …) and for choosing sensible default styles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AtomCategory {
     Protein,
     NucleicAcid,

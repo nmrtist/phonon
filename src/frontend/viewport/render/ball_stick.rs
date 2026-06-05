@@ -62,13 +62,13 @@ struct TrimmedBondSegment {
 /// classification, and the bond and atom loops below each consult them multiple
 /// times — so they are computed once, up front, and indexed by atom.
 #[derive(Clone, Copy)]
-struct AtomDraw {
-    visible: bool,
-    style: AtomStyle,
-    color: Color32,
+pub(super) struct AtomDraw {
+    pub(super) visible: bool,
+    pub(super) style: AtomStyle,
+    pub(super) color: Color32,
 }
 
-fn build_atom_draw_table(
+pub(super) fn build_atom_draw_table(
     structure: &Structure,
     selection: &AtomSelection,
     visual_state: &ViewportVisualState,
