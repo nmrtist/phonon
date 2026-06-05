@@ -385,6 +385,10 @@ pub fn element_style(symbol: &str) -> ElementStyle {
 }
 
 pub fn infer_bonds_with_cell(atoms: &[Atom], cell: Option<&UnitCell>) -> Vec<Bond> {
+    // A placeholder `1×1×1` cell is not a real lattice; treating it as periodic
+    // would bond every atom to a neighbor's image. Ignore it here so no caller
+    // can accidentally over-bond, regardless of which loader produced it.
+    let cell = cell.filter(|cell| !cell.is_placeholder());
     if cell.is_none() {
         return infer_nonperiodic_bonds(atoms);
     }

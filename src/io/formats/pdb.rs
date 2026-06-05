@@ -156,14 +156,19 @@ fn build_model_structure(
         identity_to_index.entry(identity).or_insert(atom_index);
     }
 
-    let stored_cell = match inferred_cell {
-        Some(cell) if is_dummy_cell(cell) => None,
+    // A placeholder cell (e.g. a `CRYST1 1 1 1 ... P1` written by modeling tools
+    // for a non-periodic molecule) must not drive periodic bond inference: its
+    // minimum-image convention would place every atom within bonding distance of
+    // a neighbor's image and connect everything. Use the same dummy-cell guard
+    // here as for storage, so such files fall back to non-periodic inference.
+    let effective_cell = match inferred_cell {
+        Some(cell) if cell.is_placeholder() => None,
         other => other.cloned(),
     };
 
     let bonds = resolve_bonds(
         &atoms,
-        inferred_cell,
+        effective_cell.as_ref(),
         &serial_to_index,
         &identity_to_index,
         conect_pairs,
@@ -172,7 +177,7 @@ fn build_model_structure(
 
     let biopolymer = build_biopolymer(&annotations, secondary_structures.to_vec());
 
-    let mut structure = match stored_cell {
+    let mut structure = match effective_cell {
         Some(cell) => Structure::with_cell_and_bonds(title, atoms, bonds, cell),
         None => Structure::with_bonds(title, atoms, bonds),
     };
@@ -668,15 +673,6 @@ fn bond_type_from_conect_occurrences(occurrences: usize) -> BondType {
     }
 }
 
-fn is_dummy_cell(cell: &UnitCell) -> bool {
-    (cell.a - 1.0).abs() < 0.001
-        && (cell.b - 1.0).abs() < 0.001
-        && (cell.c - 1.0).abs() < 0.001
-        && (cell.alpha - 90.0).abs() < 0.001
-        && (cell.beta - 90.0).abs() < 0.001
-        && (cell.gamma - 90.0).abs() < 0.001
-}
-
 fn element_from_atom_name(atom_name: &str) -> String {
     let letters = atom_name
         .chars()
@@ -921,19 +917,36 @@ END
 
     #[test]
     fn ignores_dummy_cryst1_placeholder_cells() {
+        // A `CRYST1 1 1 1 90 90 90` placeholder is what modeling tools write for a
+        // non-periodic molecule. It must be ignored for both storage *and* bond
+        // inference: under the minimum-image convention a 1 Å cell places every
+        // atom within bonding distance of a neighbor's periodic image, which would
+        // connect all atom pairs (a C60 buckyball becomes all 1770 pairs). Four
+        // carbons in a line must yield exactly the two real C-C bonds (1-2, 2-3),
+        // never six. (Earlier this was asserted with only two atoms, where the
+        // spurious bond happened to look correct and masked the over-bonding.)
         let structure = parse_pdb(
             "\
 TITLE     dummy cell
 CRYST1    1.000    1.000    1.000  90.00  90.00  90.00 P 1
-ATOM      1  H1   MOL     1       0.100   0.000   0.000  1.00  0.00           H
-ATOM      2  H2   MOL     1       1.100   0.000   0.000  1.00  0.00           H
+ATOM      1  C   UNK A   1       0.000   0.000   0.000  1.00  0.00           C
+ATOM      2  C   UNK A   1       1.450   0.000   0.000  1.00  0.00           C
+ATOM      3  C   UNK A   1       2.900   0.000   0.000  1.00  0.00           C
+ATOM      4  C   UNK A   1      10.000   0.000   0.000  1.00  0.00           C
 END
 ",
         )
         .expect("valid pdb");
 
-        assert!(structure.cell.is_none());
-        assert_eq!(structure.bonds.len(), 1);
+        assert!(
+            structure.cell.is_none(),
+            "the placeholder cell must be discarded"
+        );
+        assert_eq!(
+            structure.bonds.len(),
+            2,
+            "the placeholder cell must not connect all atom pairs"
+        );
     }
 
     #[test]
