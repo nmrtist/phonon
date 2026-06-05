@@ -12,9 +12,9 @@ use super::super::camera::{Projector, camera_forward_world};
 use super::backend::{LineSegmentPrimitive, RenderScene};
 use super::cartoon::{ScreenDepthBuffer, mesh_sample_visible};
 use super::{
-    MESH_VISIBILITY_SAMPLE_PIXELS, PrimitiveMeshVertex, PrimitiveTriangle, SurfaceCacheKey,
-    ViewportCache, ViewportVisualState, atom_chain_id, atom_is_standard_amino_acid, darken,
-    lerp_pos2, lighten, mix_color, normalize_vector3, rotate,
+    MESH_VISIBILITY_SAMPLE_PIXELS, PrimitiveMeshVertex, PrimitiveTriangle, SurfaceCache,
+    SurfaceCacheKey, ViewportVisualState, atom_chain_id, atom_is_standard_amino_acid, darken,
+    lerp_pos2, lighten, mix_color, normalize_vector3,
 };
 
 const SURFACE_FILL_GRID_SPACING: f32 = 0.82;
@@ -63,7 +63,7 @@ pub(crate) fn build_cached_surface_scene(
     surface_cache_key: &SurfaceCacheKey,
     viewport: &Projector,
     visual_state: &ViewportVisualState,
-    cache: &mut ViewportCache,
+    cache: &mut SurfaceCache,
     cartoon_depth: Option<&ScreenDepthBuffer>,
 ) -> RenderScene {
     if visual_state.surface.chains.is_empty() {
@@ -132,23 +132,23 @@ fn build_surface_scene_from_geometry(
 }
 
 fn cached_surface_geometry<'a>(
-    cache: &'a mut ViewportCache,
+    cache: &'a mut SurfaceCache,
     structure: &Structure,
     key: &SurfaceCacheKey,
 ) -> &'a SurfaceSceneGeometry {
-    if cache.surface_key.as_ref() != Some(key) {
-        cache.surface_geometry = Some(SurfaceSceneGeometry {
+    if cache.key.as_ref() != Some(key) {
+        cache.geometry = Some(SurfaceSceneGeometry {
             chains: surface_chain_geometries_with_style(
                 structure,
                 key.surface_chains.iter().copied(),
                 key.style,
             ),
         });
-        cache.surface_key = Some(key.clone());
+        cache.key = Some(key.clone());
     }
 
     cache
-        .surface_geometry
+        .geometry
         .as_ref()
         .expect("surface geometry cache must be initialized")
 }
@@ -555,7 +555,7 @@ fn shade_union_surface_color(
     light_preset: LightPreset,
 ) -> Color32 {
     let view_normal = normalize_vector3(
-        rotate(surface_normal, viewport.yaw, viewport.pitch),
+        viewport.rotate_to_view(surface_normal),
         Vector3::new(0.0, 0.0, 1.0),
     );
     let light_direction =

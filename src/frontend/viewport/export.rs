@@ -42,15 +42,15 @@ pub(crate) fn export_viewport_png(
 
     let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width as f32, height as f32));
     let (center, radius) = view_center_and_radius(structure, visual_state.show_cell);
-    let viewport = Projector {
+    let viewport = Projector::new(
         rect,
         center,
-        scale: rect.width().min(rect.height()) * 0.35 * (1.0 + camera.zoom) / radius,
-        camera_distance: radius * 3.2,
-        yaw: camera.yaw,
-        pitch: camera.pitch,
-        pan: camera.pan,
-    };
+        rect.width().min(rect.height()) * 0.35 * (1.0 + camera.zoom) / radius,
+        radius * 3.2,
+        camera.yaw,
+        camera.pitch,
+        camera.pan,
+    );
     let geometry = build_viewport_geometry(structure, &viewport);
     let scene_result = RepresentationComposer::for_export(
         structure,

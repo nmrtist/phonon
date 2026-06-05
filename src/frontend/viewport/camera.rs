@@ -19,6 +19,13 @@ pub(super) struct Projector {
     pub(super) yaw: f32,
     pub(super) pitch: f32,
     pub(super) pan: Vec2,
+    /// Yaw/pitch sines and cosines, computed once at construction. The viewport
+    /// projects and shades hundreds of surface vertices per atom; recomputing
+    /// `sin_cos` per vertex (as the bare [`rotate`] does) dominated the hot path.
+    sin_yaw: f32,
+    cos_yaw: f32,
+    sin_pitch: f32,
+    cos_pitch: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -29,8 +36,47 @@ pub(super) struct Projected {
 }
 
 impl Projector {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        rect: Rect,
+        center: Point3<f32>,
+        scale: f32,
+        camera_distance: f32,
+        yaw: f32,
+        pitch: f32,
+        pan: Vec2,
+    ) -> Self {
+        let (sin_yaw, cos_yaw) = yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = pitch.sin_cos();
+        Self {
+            rect,
+            center,
+            scale,
+            camera_distance,
+            yaw,
+            pitch,
+            pan,
+            sin_yaw,
+            cos_yaw,
+            sin_pitch,
+            cos_pitch,
+        }
+    }
+
+    /// Rotate a world-space vector into view space using the camera's cached
+    /// yaw/pitch trig — a yaw-then-pitch rotation with no per-call `sin_cos`.
+    pub(super) fn rotate_to_view(&self, v: Vector3<f32>) -> Vector3<f32> {
+        rotate_with(
+            v,
+            self.sin_yaw,
+            self.cos_yaw,
+            self.sin_pitch,
+            self.cos_pitch,
+        )
+    }
+
     pub(super) fn view_space(&self, point: Point3<f32>) -> Vector3<f32> {
-        rotate(point - self.center, self.yaw, self.pitch)
+        self.rotate_to_view(point - self.center)
     }
 
     pub(super) fn project(&self, point: Point3<f32>) -> Projected {
@@ -74,9 +120,9 @@ pub(super) fn view_center_and_radius(
     (center, radius)
 }
 
-pub(super) fn rotate(v: Vector3<f32>, yaw: f32, pitch: f32) -> Vector3<f32> {
-    let (sy, cy) = yaw.sin_cos();
-    let (sp, cp) = pitch.sin_cos();
+/// Yaw-then-pitch rotation with the trig terms supplied by the caller, so a
+/// per-frame `sin_cos` can be shared across many vertices.
+fn rotate_with(v: Vector3<f32>, sy: f32, cy: f32, sp: f32, cp: f32) -> Vector3<f32> {
     let x = cy * v.x + sy * v.z;
     let z = -sy * v.x + cy * v.z;
     let y = cp * v.y - sp * z;

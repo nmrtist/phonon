@@ -1,7 +1,7 @@
 use crate::{domain::Structure, frontend::AtomSelection};
 
 use super::{
-    SurfaceCacheKey, ViewportCache, ViewportVisualState,
+    SurfaceCache, SurfaceCacheKey, ViewportVisualState,
     camera::Projector,
     render::{
         PickTarget, RenderScene, ScreenDepthBuffer, ViewportGeometry, any_atoms_drawn_as_cartoon,
@@ -31,14 +31,14 @@ enum SurfaceCacheMode<'a> {
 }
 
 pub(super) struct SurfaceCacheContext<'a> {
-    cache: &'a mut ViewportCache,
+    cache: &'a mut SurfaceCache,
     structure_id: u64,
     structure_revision: u64,
 }
 
 impl<'a> SurfaceCacheContext<'a> {
     pub(super) fn new(
-        cache: &'a mut ViewportCache,
+        cache: &'a mut SurfaceCache,
         structure_id: u64,
         structure_revision: u64,
     ) -> Self {

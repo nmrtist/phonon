@@ -4,7 +4,7 @@ use crate::domain::{BondType, Structure, UnitCell};
 
 use super::super::camera::{Projected, Projector};
 use super::{
-    ViewportCache, ViewportCacheKey, ViewportVisualState, atom_screen_radius, atom_visible,
+    GeometryCache, ViewportCacheKey, ViewportVisualState, atom_screen_radius, atom_visible,
 };
 
 #[derive(Clone)]
@@ -35,7 +35,7 @@ pub(crate) struct RenderedBondSegment {
 }
 
 pub(crate) fn cached_geometry<'a>(
-    cache: &'a mut ViewportCache,
+    cache: &'a mut GeometryCache,
     key: ViewportCacheKey,
     structure: &Structure,
     viewport: &Projector,

@@ -16,7 +16,7 @@ use super::backend::{LineSegmentPrimitive, RenderScene};
 use super::{
     PrimitiveMeshVertex, PrimitiveTriangle, ViewportVisualState, chain_color, darken,
     edge_function, initial_cartoon_side, interpolate_orientation_hint, lighten, mix_color,
-    normalize_vector3, orthogonalize_to_tangent, rotate, usable_biopolymer,
+    normalize_vector3, orthogonalize_to_tangent, usable_biopolymer,
 };
 
 const CARTOON_DEPTH_BUFFER_RESOLUTION: usize = 384;
@@ -689,7 +689,7 @@ fn shade_cartoon_color(
     light_preset: LightPreset,
 ) -> Color32 {
     let view_normal = normalize_vector3(
-        rotate(surface_normal, viewport.yaw, viewport.pitch),
+        viewport.rotate_to_view(surface_normal),
         Vector3::new(0.0, 0.0, 1.0),
     );
     let light_direction =

@@ -7,9 +7,7 @@ use crate::{
     frontend::{AtomSelection, state::AtomStyle},
 };
 
-use super::{
-    SurfaceCacheKey, ViewportCache, ViewportCacheKey, ViewportVisualState, camera::rotate,
-};
+use super::{GeometryCache, SurfaceCache, SurfaceCacheKey, ViewportCacheKey, ViewportVisualState};
 
 mod backend;
 mod ball_stick;
