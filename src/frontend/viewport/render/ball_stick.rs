@@ -1,11 +1,12 @@
 use std::f32::consts::TAU;
+use std::sync::LazyLock;
 
 use eframe::egui::Color32;
 use nalgebra::{Point3, Vector3};
 
 use crate::{
     domain::{BondType, Structure},
-    frontend::AtomSelection,
+    frontend::{AtomSelection, state::AtomStyle},
 };
 
 use super::super::camera::{Projector, camera_forward_world};
@@ -17,7 +18,7 @@ use super::{
     POINT_DISC_SEGMENTS, POINT_LOD_ATOM_THRESHOLD, PrimitiveMeshVertex, PrimitiveTriangle,
     SINGLE_BOND_RADIUS, SPHERE_LATITUDE_SEGMENTS, SPHERE_LONGITUDE_SEGMENTS, ViewportVisualState,
     atom_ball_radius, atom_render_color_with_settings, atom_visible, darken, desaturate_color,
-    initial_cartoon_side, mix_color, normalize_vector3, orthogonalize_to_tangent, rotate,
+    initial_cartoon_side, mix_color, normalize_vector3, orthogonalize_to_tangent,
 };
 
 #[derive(Clone, Copy)]
@@ -55,6 +56,32 @@ struct TrimmedBondSegment {
     length: f32,
 }
 
+/// Per-atom drawing inputs resolved once per frame: whether the atom is drawn in
+/// the ball-and-stick scene, its effective [`AtomStyle`], and its render color.
+/// Resolving each of these touches a sparse override map plus residue/category
+/// classification, and the bond and atom loops below each consult them multiple
+/// times — so they are computed once, up front, and indexed by atom.
+#[derive(Clone, Copy)]
+struct AtomDraw {
+    visible: bool,
+    style: AtomStyle,
+    color: Color32,
+}
+
+fn build_atom_draw_table(
+    structure: &Structure,
+    selection: &AtomSelection,
+    visual_state: &ViewportVisualState,
+) -> Vec<AtomDraw> {
+    (0..structure.atoms.len())
+        .map(|index| AtomDraw {
+            visible: atom_visible(structure, visual_state, index),
+            style: visual_state.resolved_atom_style(structure, index),
+            color: atom_render_color_with_settings(structure, index, selection, visual_state),
+        })
+        .collect()
+}
+
 pub(crate) fn build_ball_and_stick_scene(
     structure: &Structure,
     geometry: &ViewportGeometry,
@@ -62,12 +89,14 @@ pub(crate) fn build_ball_and_stick_scene(
     selection: &AtomSelection,
     visual_state: &ViewportVisualState,
 ) -> RenderScene {
+    let atom_draw = build_atom_draw_table(structure, selection, visual_state);
+
     // An atom is drawn when its resolved style places it in the ball-and-stick
     // scene (i.e. not Hidden and not drawn via the cartoon path).
     let visible_atoms = geometry
         .atoms
         .iter()
-        .filter(|atom| atom_visible(structure, visual_state, atom.index))
+        .filter(|atom| atom_draw[atom.index].visible)
         .collect::<Vec<_>>();
 
     // Large systems (e.g. an explicitly solvated protein, dominated by bulk
@@ -77,20 +106,16 @@ pub(crate) fn build_ball_and_stick_scene(
     // fallback, so a user who simplifies the solvent keeps their chosen look.
     let heavy_atoms = visible_atoms
         .iter()
-        .filter(|atom| {
-            visual_state
-                .resolved_atom_style(structure, atom.index)
-                .is_heavy()
-        })
+        .filter(|atom| atom_draw[atom.index].style.is_heavy())
         .count();
     if heavy_atoms > POINT_LOD_ATOM_THRESHOLD {
         return build_point_cloud_scene(
             structure,
             geometry,
             &visible_atoms,
+            &atom_draw,
             viewport,
             selection,
-            visual_state,
         );
     }
 
@@ -98,37 +123,29 @@ pub(crate) fn build_ball_and_stick_scene(
     let mut lines = Vec::new();
 
     for bond in &geometry.bonds {
-        if !bond_visible(structure, visual_state, bond) {
+        let a = atom_draw[bond.a];
+        let b = atom_draw[bond.b];
+        if !(a.visible || b.visible) {
             continue;
         }
-        let style_a = visual_state.resolved_atom_style(structure, bond.a);
-        let style_b = visual_state.resolved_atom_style(structure, bond.b);
-        if style_a.draws_stick_bonds() || style_b.draws_stick_bonds() {
+        if a.style.draws_stick_bonds() || b.style.draws_stick_bonds() {
             append_bond_triangles(
                 &mut opaque_triangles,
                 structure,
                 bond,
                 viewport,
-                selection,
-                visual_state,
+                a.color,
+                b.color,
             );
-        } else if style_a.draws_line_bonds() || style_b.draws_line_bonds() {
-            push_split_bond_line(
-                &mut lines,
-                viewport,
-                bond,
-                structure,
-                selection,
-                visual_state,
-            );
+        } else if a.style.draws_line_bonds() || b.style.draws_line_bonds() {
+            push_split_bond_line(&mut lines, viewport, bond, structure, a.color, b.color);
         }
     }
 
     for atom_projection in &visible_atoms {
         let index = atom_projection.index;
-        let style = visual_state.resolved_atom_style(structure, index);
-        let color = atom_render_color_with_settings(structure, index, selection, visual_state);
-        match style.sphere_radius_scale() {
+        let draw = atom_draw[index];
+        match draw.style.sphere_radius_scale() {
             Some(scale) => {
                 let atom = &structure.atoms[index];
                 let mut radius = atom_ball_radius(&atom.element) * (scale / BALL_RADIUS_SCALE);
@@ -142,17 +159,17 @@ pub(crate) fn build_ball_and_stick_scene(
                     viewport,
                     atom.position,
                     radius,
-                    color,
+                    draw.color,
                 );
             }
-            None if style.draws_point() => {
+            None if draw.style.draws_point() => {
                 let mut radius = point_disc_radius(atom_projection.scale);
                 if selection.primary() == Some(index) {
                     radius *= 1.6;
                 } else if selection.contains(index) {
                     radius *= 1.3;
                 }
-                append_atom_point(&mut opaque_triangles, atom_projection, radius, color);
+                append_atom_point(&mut opaque_triangles, atom_projection, radius, draw.color);
             }
             None => {}
         }
@@ -171,44 +188,35 @@ fn build_point_cloud_scene(
     structure: &Structure,
     geometry: &ViewportGeometry,
     visible_atoms: &[&RenderedAtom],
+    atom_draw: &[AtomDraw],
     viewport: &Projector,
     selection: &AtomSelection,
-    visual_state: &ViewportVisualState,
 ) -> RenderScene {
     let mut opaque_triangles = Vec::new();
     let mut lines = Vec::new();
 
     for bond in &geometry.bonds {
-        if !bond_visible(structure, visual_state, bond) {
+        let a = atom_draw[bond.a];
+        let b = atom_draw[bond.b];
+        if !(a.visible || b.visible) {
             continue;
         }
-        push_split_bond_line(
-            &mut lines,
-            viewport,
-            bond,
-            structure,
-            selection,
-            visual_state,
-        );
+        push_split_bond_line(&mut lines, viewport, bond, structure, a.color, b.color);
     }
 
     for atom_projection in visible_atoms {
+        let index = atom_projection.index;
         let mut radius = point_disc_radius(atom_projection.scale);
-        if selection.primary() == Some(atom_projection.index) {
+        if selection.primary() == Some(index) {
             radius *= 1.6;
-        } else if selection.contains(atom_projection.index) {
+        } else if selection.contains(index) {
             radius *= 1.3;
         }
         append_atom_point(
             &mut opaque_triangles,
             atom_projection,
             radius,
-            atom_render_color_with_settings(
-                structure,
-                atom_projection.index,
-                selection,
-                visual_state,
-            ),
+            atom_draw[index].color,
         );
     }
 
@@ -227,14 +235,12 @@ fn push_split_bond_line(
     viewport: &Projector,
     bond: &RenderedBondSegment,
     structure: &Structure,
-    selection: &AtomSelection,
-    visual_state: &ViewportVisualState,
+    color_a: Color32,
+    color_b: Color32,
 ) {
     let start = viewport.project(bond.start);
     let end = viewport.project(bond.end);
     let mid = viewport.project(Point3::from((bond.start.coords + bond.end.coords) * 0.5));
-    let color_a = atom_render_color_with_settings(structure, bond.a, selection, visual_state);
-    let color_b = atom_render_color_with_settings(structure, bond.b, selection, visual_state);
     // Color the half at `start` by whichever atom that end sits on.
     let a_pos = structure.atoms[bond.a].position;
     let (start_color, end_color) =
@@ -294,27 +300,14 @@ fn append_atom_point(
     }
 }
 
-fn bond_visible(
-    structure: &Structure,
-    visual_state: &ViewportVisualState,
-    bond: &RenderedBondSegment,
-) -> bool {
-    // A bond is drawn when at least one endpoint is part of the ball-and-stick
-    // scene. `atom_visible` already excludes Hidden and cartoon-drawn atoms, so
-    // no cartoon special-case is needed here.
-    atom_visible(structure, visual_state, bond.a) || atom_visible(structure, visual_state, bond.b)
-}
-
 fn append_bond_triangles(
     triangles: &mut Vec<PrimitiveTriangle>,
     structure: &Structure,
     bond: &RenderedBondSegment,
     viewport: &Projector,
-    selection: &AtomSelection,
-    visual_state: &ViewportVisualState,
+    start_color: Color32,
+    end_color: Color32,
 ) {
-    let start_color = atom_render_color_with_settings(structure, bond.a, selection, visual_state);
-    let end_color = atom_render_color_with_settings(structure, bond.b, selection, visual_state);
     let Some(trimmed) = trimmed_bond_segment(structure, bond.a, bond.b, bond.start, bond.end)
     else {
         return;
@@ -447,6 +440,7 @@ fn append_sphere_triangles(
     radius: f32,
     color: Color32,
 ) {
+    let shade = surface_shade(color);
     let mut rings = Vec::with_capacity(SPHERE_LATITUDE_SEGMENTS + 1);
     for latitude in 0..=SPHERE_LATITUDE_SEGMENTS {
         let polar = std::f32::consts::PI * latitude as f32 / SPHERE_LATITUDE_SEGMENTS as f32;
@@ -460,7 +454,7 @@ fn append_sphere_triangles(
                 viewport,
                 center + normal * radius,
                 normal,
-                color,
+                shade,
             ));
         }
         rings.push(ring);
@@ -542,6 +536,7 @@ fn append_cylinder_triangles(
     };
     let side = orthogonalize_to_tangent(style.orientation_hint, axis, initial_cartoon_side(axis));
     let normal = normalize_vector3(axis.cross(&side), Vector3::new(0.0, 1.0, 0.0));
+    let shade = surface_shade(style.color);
     let mut start_ring = Vec::with_capacity(BOND_RADIAL_SEGMENTS);
     let mut end_ring = Vec::with_capacity(BOND_RADIAL_SEGMENTS);
 
@@ -553,13 +548,13 @@ fn append_cylinder_triangles(
             viewport,
             span.start + radial * style.radius,
             radial,
-            style.color,
+            shade,
         ));
         end_ring.push(primitive_vertex(
             viewport,
             span.end + radial * style.radius,
             radial,
-            style.color,
+            shade,
         ));
     }
 
@@ -600,7 +595,8 @@ fn append_cylinder_cap(
     ring: &[PrimitiveMeshVertex],
     color: Color32,
 ) {
-    let center_vertex = primitive_vertex(viewport, center, normal, darken(color, 0.06));
+    let center_vertex =
+        primitive_vertex(viewport, center, normal, surface_shade(darken(color, 0.06)));
     for index in 0..ring.len() {
         let next_index = (index + 1) % ring.len();
         triangles.push(super::primitive_triangle(
@@ -663,56 +659,80 @@ fn bond_offset_direction(
     }
 }
 
+/// Paper/shadow tints used by the hand-drawn shading model. Constant across the
+/// whole frame.
+const PAPER_TINT: Color32 = Color32::from_rgb(246, 243, 236);
+const SHADOW_TINT: Color32 = Color32::from_rgb(120, 129, 144);
+
+/// View-space lighting directions. They are identical for every vertex of a
+/// frame, so they are normalized once on first use rather than per vertex.
+static LIGHT_DIRECTION: LazyLock<Vector3<f32>> = LazyLock::new(|| {
+    normalize_vector3(Vector3::new(-0.35, 0.45, 1.0), Vector3::new(0.0, 0.0, 1.0))
+});
+static HALF_VECTOR: LazyLock<Vector3<f32>> = LazyLock::new(|| {
+    normalize_vector3(
+        *LIGHT_DIRECTION + Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    )
+});
+
+/// The normal-independent half of the surface shading. These color mixes depend
+/// only on a primitive's base color, so they are computed once per
+/// sphere/cylinder and reused across its (hundreds of) surface vertices instead
+/// of being recomputed per vertex.
+#[derive(Clone, Copy)]
+struct SurfaceShade {
+    washed: Color32,
+}
+
+fn surface_shade(base_color: Color32) -> SurfaceShade {
+    let neutral = desaturate_color(base_color, 0.42);
+    let softened = mix_color(base_color, neutral, 0.34);
+    let washed = mix_color(softened, PAPER_TINT, 0.14);
+    SurfaceShade { washed }
+}
+
 fn primitive_vertex(
     viewport: &Projector,
     position: Point3<f32>,
     normal: Vector3<f32>,
-    color: Color32,
+    shade: SurfaceShade,
 ) -> PrimitiveMeshVertex {
     let projected = viewport.project(position);
     PrimitiveMeshVertex {
         pos: projected.pos,
         depth: projected.depth,
-        color: shade_surface_color(viewport, color, normal),
+        color: shade_surface_color(viewport, shade, normal),
     }
 }
 
 fn shade_surface_color(
     viewport: &Projector,
-    base_color: Color32,
+    shade: SurfaceShade,
     surface_normal: Vector3<f32>,
 ) -> Color32 {
     let view_normal = normalize_vector3(
-        rotate(surface_normal, viewport.yaw, viewport.pitch),
+        viewport.rotate_to_view(surface_normal),
         Vector3::new(0.0, 0.0, 1.0),
     );
-    let light_direction =
-        normalize_vector3(Vector3::new(-0.35, 0.45, 1.0), Vector3::new(0.0, 0.0, 1.0));
-    let half_vector = normalize_vector3(
-        light_direction + Vector3::new(0.0, 0.0, 1.0),
-        Vector3::new(0.0, 0.0, 1.0),
-    );
+    let light_direction = *LIGHT_DIRECTION;
+    let half_vector = *HALF_VECTOR;
     let diffuse = view_normal.dot(&light_direction).max(0.0);
     let rim = (1.0 - view_normal.z.abs()).powi(2) * 0.10;
     let soft_highlight = view_normal.dot(&half_vector).max(0.0).powf(5.5) * 0.07;
-    let paper_tint = Color32::from_rgb(246, 243, 236);
-    let shadow_tint = Color32::from_rgb(120, 129, 144);
-    let neutral = desaturate_color(base_color, 0.42);
-
-    let softened = mix_color(base_color, neutral, 0.34);
-    let washed = mix_color(softened, paper_tint, 0.14);
+    let washed = shade.washed;
     let brightness = (0.46 + diffuse * 0.22 + rim * 0.55).clamp(0.0, 1.0);
     let shaded = if brightness >= 0.5 {
         super::lighten(washed, (brightness - 0.5) * 0.42)
     } else {
         mix_color(
             super::darken(washed, (0.5 - brightness) * 0.38),
-            shadow_tint,
+            SHADOW_TINT,
             0.18,
         )
     };
 
-    mix_color(shaded, paper_tint, soft_highlight)
+    mix_color(shaded, PAPER_TINT, soft_highlight)
 }
 
 #[cfg(test)]
@@ -725,15 +745,15 @@ mod tests {
     use nalgebra::Point3;
 
     fn test_projector() -> Projector {
-        Projector {
-            rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(2000.0)),
-            center: Point3::origin(),
-            scale: 10.0,
-            camera_distance: 1000.0,
-            yaw: 0.0,
-            pitch: 0.0,
-            pan: Vec2::ZERO,
-        }
+        Projector::new(
+            Rect::from_min_size(Pos2::ZERO, Vec2::splat(2000.0)),
+            Point3::origin(),
+            10.0,
+            1000.0,
+            0.0,
+            0.0,
+            Vec2::ZERO,
+        )
     }
 
     /// A grid of widely spaced atoms so no bonds are inferred, making the

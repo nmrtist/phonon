@@ -26,20 +26,32 @@ use render::*;
 pub const STRUCTURE_INTERACTION_FRAME: Duration = Duration::from_millis(16);
 pub const HOVER_FRAME: Duration = Duration::from_millis(100);
 
+/// Per-viewport render caches. The projected ball-and-stick geometry and the
+/// (much more expensive) molecular surface are cached independently so a frame
+/// can borrow the geometry immutably while still updating the surface cache —
+/// avoiding a full clone of the geometry every frame.
 #[derive(Default)]
 pub struct ViewportCache {
+    geometry: GeometryCache,
+    surface: SurfaceCache,
+}
+
+#[derive(Default)]
+pub(super) struct GeometryCache {
     key: Option<ViewportCacheKey>,
     geometry: Option<ViewportGeometry>,
-    surface_key: Option<SurfaceCacheKey>,
-    surface_geometry: Option<SurfaceSceneGeometry>,
+}
+
+#[derive(Default)]
+pub(super) struct SurfaceCache {
+    key: Option<SurfaceCacheKey>,
+    geometry: Option<SurfaceSceneGeometry>,
 }
 
 impl ViewportCache {
     pub fn clear(&mut self) {
-        self.key = None;
-        self.geometry = None;
-        self.surface_key = None;
-        self.surface_geometry = None;
+        self.geometry = GeometryCache::default();
+        self.surface = SurfaceCache::default();
     }
 }
 
@@ -107,15 +119,15 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
     }
 
     let (center, radius) = view_center_and_radius(structure, visual_state.show_cell);
-    let viewport = Projector {
+    let viewport = Projector::new(
         rect,
         center,
-        scale: rect.width().min(rect.height()) * 0.35 * (1.0 + camera.zoom) / radius,
-        camera_distance: radius * 3.2,
-        yaw: camera.yaw,
-        pitch: camera.pitch,
-        pan: camera.pan,
-    };
+        rect.width().min(rect.height()) * 0.35 * (1.0 + camera.zoom) / radius,
+        radius * 3.2,
+        camera.yaw,
+        camera.pitch,
+        camera.pan,
+    );
     let cache_key = ViewportCacheKey {
         structure_id,
         structure_revision,
@@ -124,14 +136,14 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         camera: *camera,
         show_cell: visual_state.show_cell,
     };
-    let geometry = cached_geometry(cache, cache_key, structure, &viewport).clone();
+    let geometry = cached_geometry(&mut cache.geometry, cache_key, structure, &viewport);
     let scene_result = RepresentationComposer::for_viewport(
         structure,
-        &geometry,
+        geometry,
         &viewport,
         selection,
         visual_state,
-        SurfaceCacheContext::new(cache, structure_id, structure_revision),
+        SurfaceCacheContext::new(&mut cache.surface, structure_id, structure_revision),
     )
     .build();
     let rendered_in_full =
