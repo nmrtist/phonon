@@ -19,6 +19,7 @@ pub(super) fn render_bottom_panel(
         egui::vec2(ui.available_width(), 30.0),
         Layout::left_to_right(Align::Center),
         |ui| {
+            let pal = crate::frontend::theme::palette(ui);
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
 
@@ -29,7 +30,8 @@ pub(super) fn render_bottom_panel(
                         configure_panel_tab_button_visuals(ui, selected);
                         ui.add(
                             Button::new(
-                                RichText::new(tab.label()).color(core_button_text_color(selected)),
+                                RichText::new(tab.label())
+                                    .color(core_button_text_color(&pal, selected)),
                             )
                             .selected(selected),
                         )
@@ -46,7 +48,7 @@ pub(super) fn render_bottom_panel(
                         [28.0, 28.0],
                         Button::new(
                             RichText::new(egui_phosphor::regular::CARET_DOWN)
-                                .color(core_button_text_color(false)),
+                                .color(core_button_text_color(&pal, false)),
                         ),
                     )
                 })
@@ -60,24 +62,26 @@ pub(super) fn render_bottom_panel(
     );
     ui.separator();
 
-    ui.allocate_ui_with_layout(ui.available_size(), Layout::top_down(Align::Min), |ui| {
-        ui.take_available_space();
-        ui.set_width(ui.available_width());
-
-        match state.ui.layout.active_panel_tab {
-            PanelTab::Output => render_output_panel(state, ui),
-            PanelTab::Console => render_console_panel(state, ui, actions),
-            PanelTab::TaskMonitor => render_task_monitor_panel(state, ui, actions),
-        }
-    });
+    // Render the active tab directly in the panel body; each tab fills the
+    // remaining height with a scroll area (`auto_shrink([false, false])`). The
+    // panel's height is fixed by `exact_size` in `render_workspace` — see the
+    // note there about the runaway growth that a resizable panel hit.
+    ui.set_width(ui.available_width());
+    match state.ui.layout.active_panel_tab {
+        PanelTab::Output => render_output_panel(state, ui),
+        PanelTab::Console => render_console_panel(state, ui, actions),
+        PanelTab::TaskMonitor => render_task_monitor_panel(state, ui, actions),
+    }
 }
 
 fn configure_panel_tab_button_visuals(ui: &mut Ui, selected: bool) {
+    let pal = crate::frontend::theme::palette(ui);
     let inactive_fill = egui::Color32::TRANSPARENT;
-    let hovered_fill = egui::Color32::from_rgba_unmultiplied(70, 78, 88, 18);
-    let selected_fill = egui::Color32::from_rgba_unmultiplied(83, 163, 242, 58);
-    let selected_hover_fill = egui::Color32::from_rgba_unmultiplied(83, 163, 242, 74);
-    let text_color = core_button_text_color(selected);
+    let hovered_fill = pal.neutral_overlay(18);
+    let selected_fill = pal.blue_overlay(58);
+    let selected_hover_fill = pal.blue_overlay(74);
+    let text_color = core_button_text_color(&pal, selected);
+    let selected_text = core_button_text_color(&pal, true);
     let visuals = &mut ui.style_mut().visuals.widgets;
 
     visuals.inactive.weak_bg_fill = inactive_fill;
@@ -88,17 +92,17 @@ fn configure_panel_tab_button_visuals(ui: &mut Ui, selected: bool) {
     visuals.hovered.weak_bg_fill = hovered_fill;
     visuals.hovered.bg_fill = hovered_fill;
     visuals.hovered.bg_stroke = Stroke::NONE;
-    visuals.hovered.fg_stroke.color = core_button_text_color(true);
+    visuals.hovered.fg_stroke.color = selected_text;
 
     visuals.active.weak_bg_fill = selected_hover_fill;
     visuals.active.bg_fill = selected_hover_fill;
     visuals.active.bg_stroke = Stroke::NONE;
-    visuals.active.fg_stroke.color = core_button_text_color(true);
+    visuals.active.fg_stroke.color = selected_text;
 
     visuals.open.weak_bg_fill = selected_fill;
     visuals.open.bg_fill = selected_fill;
     visuals.open.bg_stroke = Stroke::NONE;
-    visuals.open.fg_stroke.color = core_button_text_color(true);
+    visuals.open.fg_stroke.color = selected_text;
 }
 
 fn render_output_panel(state: &mut AppState, ui: &mut egui::Ui) {
@@ -116,54 +120,62 @@ fn render_output_panel(state: &mut AppState, ui: &mut egui::Ui) {
 
 fn render_console_panel(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     ui.set_width(ui.available_width());
-    let available_height = (ui.available_height() - 34.0).max(40.0);
-    ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .max_height(available_height)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            for line in &state.output_log {
-                ui.monospace(line);
+    // Lay out bottom-up: pin the prompt to the bottom, then let the log fill the
+    // space above it. The scroll area is sized from the *remaining* height, so
+    // its content can never overflow the panel — a previous version reserved a
+    // hardcoded 34px for the prompt row, and the few-pixel mismatch made the
+    // console overflow each frame, which egui's Panel persists as the next
+    // frame's size, growing the panel until it filled the window.
+    ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+        ui.horizontal(|ui| {
+            ui.monospace("psh>");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut state.ui.console.input)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("view background white"),
+            );
+            let run =
+                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if run || ui.button("Run").clicked() {
+                let command = state.ui.console.input.trim().to_string();
+                if !command.is_empty() {
+                    actions.push(AppAction::RunConsoleCommand(command));
+                    state.ui.console.input.clear();
+                }
             }
         });
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.monospace("psh>");
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut state.ui.console.input)
-                .desired_width(f32::INFINITY)
-                .hint_text("view background white"),
-        );
-        let run = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        if run || ui.button("Run").clicked() {
-            let command = state.ui.console.input.trim().to_string();
-            if !command.is_empty() {
-                actions.push(AppAction::RunConsoleCommand(command));
-                state.ui.console.input.clear();
-            }
-        }
+        ui.separator();
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for line in &state.output_log {
+                    ui.monospace(line);
+                }
+            });
     });
 }
 
 pub(super) fn render_status_bar(state: &mut AppState, ui: &mut egui::Ui) {
+    let pal = crate::frontend::theme::palette(ui);
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(status_text(state.structure(), &state.ui.selection))
-                .color(egui::Color32::from_rgb(44, 58, 74)),
+                .color(pal.text_primary),
         );
         ui.separator();
-        ui.label(RichText::new(&state.message).color(egui::Color32::from_rgb(44, 58, 74)));
+        ui.label(RichText::new(&state.message).color(pal.text_primary));
     });
 }
 
-fn task_status_badge(status: TaskStatus) -> RichText {
+fn task_status_badge(pal: &crate::frontend::theme::Palette, status: TaskStatus) -> RichText {
     let color = match status {
-        TaskStatus::Ready => egui::Color32::from_rgb(120, 146, 184),
-        TaskStatus::WaitingInput => egui::Color32::from_rgb(201, 145, 62),
-        TaskStatus::Running => egui::Color32::from_rgb(61, 142, 100),
-        TaskStatus::Completed => egui::Color32::from_rgb(64, 160, 108),
-        TaskStatus::Failed => egui::Color32::from_rgb(194, 72, 72),
+        TaskStatus::Ready => pal.status_blue,
+        TaskStatus::WaitingInput => pal.status_amber,
+        TaskStatus::Running => pal.status_green,
+        TaskStatus::Completed => pal.status_green,
+        TaskStatus::Failed => pal.status_red,
     };
 
     RichText::new(status.label()).strong().color(color)
@@ -174,6 +186,7 @@ fn render_task_monitor_panel(
     ui: &mut egui::Ui,
     actions: &mut Vec<AppAction>,
 ) {
+    let pal = crate::frontend::theme::palette(ui);
     ui.set_width(ui.available_width());
     ui.horizontal(|ui| {
         ui.label(RichText::new("Task Monitor").strong());
@@ -259,7 +272,7 @@ fn render_task_monitor_panel(
                                             "{theme} / {method} / {application}"
                                         ))
                                         .small()
-                                        .color(egui::Color32::GRAY),
+                                        .color(pal.text_tertiary),
                                     );
                                 });
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -278,28 +291,26 @@ fn render_task_monitor_panel(
                                     {
                                         actions.push(AppAction::RunTask(task_id));
                                     }
-                                    ui.label(task_status_badge(status));
+                                    ui.label(task_status_badge(&pal, status));
                                 });
                             });
                             ui.add_space(4.0);
                             ui.label(
                                 RichText::new(format!("{controller_id} / {backend} / {outcome}"))
                                     .small()
-                                    .color(egui::Color32::from_rgb(104, 114, 124)),
+                                    .color(pal.text_tertiary),
                             );
                             if let Some(engine_label) = engine_label {
                                 ui.label(
                                     RichText::new(format!("Engine: {engine_label}"))
                                         .small()
-                                        .color(egui::Color32::from_rgb(104, 114, 124)),
+                                        .color(pal.text_tertiary),
                                 );
                             }
                             if let Some(run_dir) = run_dir {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(
-                                        RichText::new("Run Dir:")
-                                            .small()
-                                            .color(egui::Color32::from_rgb(104, 114, 124)),
+                                        RichText::new("Run Dir:").small().color(pal.text_tertiary),
                                     );
                                     ui.monospace(run_dir.display().to_string());
                                 });
@@ -316,7 +327,7 @@ fn render_task_monitor_panel(
                                             .unwrap_or_else(|| "-".to_string())
                                     ))
                                     .small()
-                                    .color(egui::Color32::from_rgb(104, 114, 124)),
+                                    .color(pal.text_tertiary),
                                 );
                             }
                         });
@@ -336,6 +347,7 @@ fn render_task_monitor_panel(
 }
 
 fn render_active_task_summary(state: &AppState, ui: &mut egui::Ui) {
+    let pal = crate::frontend::theme::palette(ui);
     let frame = Frame::group(ui.style()).inner_margin(Margin::same(8));
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -347,7 +359,7 @@ fn render_active_task_summary(state: &AppState, ui: &mut egui::Ui) {
         {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&task.title).strong());
-                ui.label(task_status_badge(task.status));
+                ui.label(task_status_badge(&pal, task.status));
             });
             ui.label(
                 RichText::new(format!(
@@ -357,13 +369,13 @@ fn render_active_task_summary(state: &AppState, ui: &mut egui::Ui) {
                     task.outcome.label()
                 ))
                 .small()
-                .color(egui::Color32::from_rgb(104, 114, 124)),
+                .color(pal.text_tertiary),
             );
         } else {
             ui.label(
                 RichText::new("No active task.")
                     .small()
-                    .color(egui::Color32::from_rgb(104, 114, 124)),
+                    .color(pal.text_tertiary),
             );
         }
 
@@ -380,7 +392,7 @@ fn render_active_task_summary(state: &AppState, ui: &mut egui::Ui) {
                 ui.label(
                     RichText::new(format!("Stage: {stage}"))
                         .small()
-                        .color(egui::Color32::from_rgb(104, 114, 124)),
+                        .color(pal.text_tertiary),
                 );
             }
             for line in engine_job.log_tail.iter().rev().take(6).rev() {
@@ -395,13 +407,13 @@ fn render_active_task_summary(state: &AppState, ui: &mut egui::Ui) {
                         report.steps, report.initial_energy, report.final_energy
                     ))
                     .small()
-                    .color(egui::Color32::from_rgb(104, 114, 124)),
+                    .color(pal.text_tertiary),
                 );
             } else {
                 ui.label(
                     RichText::new("Optimizer running...")
                         .small()
-                        .color(egui::Color32::from_rgb(104, 114, 124)),
+                        .color(pal.text_tertiary),
                 );
             }
         }

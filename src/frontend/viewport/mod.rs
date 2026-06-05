@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Sense, Vec2};
+use eframe::egui::{self, Align2, FontId, Pos2, Sense, Vec2};
 
 use crate::{domain::Structure, frontend::AtomSelection};
 
@@ -212,10 +212,18 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         gpu_ready,
     } = args;
     let available = ui.available_size();
+    // The default background follows the app theme (dark in dark mode); an
+    // explicit user-chosen color in settings is left untouched.
+    let pal = crate::frontend::theme::palette(ui);
+    let background = if visual_state.background_follows_theme() {
+        pal.viewport_bg
+    } else {
+        visual_state.background_color
+    };
     let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
-    painter.rect_filled(rect, 0.0, visual_state.background_color);
+    painter.rect_filled(rect, 0.0, background);
 
     if structure.atoms.is_empty() {
         if let Some(hint) = empty_state_hint {
@@ -224,7 +232,7 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
                 Align2::CENTER_CENTER,
                 hint,
                 FontId::proportional(18.0),
-                Color32::from_rgb(80, 84, 90),
+                pal.text_muted,
             );
         }
 
@@ -275,6 +283,7 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
             selection,
             visual_state,
             cache,
+            pal,
         )
     };
 
@@ -299,17 +308,35 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
             continue;
         }
         let atom = &structure.atoms[atom_projection.index];
+        // On-atom element label: follow the theme's text color, but draw a
+        // thin contrasting halo (the window backing) underneath so it stays
+        // legible over any atom-sphere color in either light or dark mode.
+        let font = FontId::proportional(12.0);
+        for offset in [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(0.0, -1.0),
+        ] {
+            painter.text(
+                atom_projection.pos + offset,
+                Align2::CENTER_CENTER,
+                &atom.element,
+                font.clone(),
+                pal.window_backing,
+            );
+        }
         painter.text(
             atom_projection.pos,
             Align2::CENTER_CENTER,
             &atom.element,
-            FontId::proportional(12.0),
-            Color32::BLACK,
+            font,
+            pal.text_strong,
         );
     }
 
     if let Some(index) = interaction.hovered_atom {
-        draw_hovered_atom_label(&painter, rect, structure, index);
+        draw_hovered_atom_label(&painter, rect, structure, index, pal);
     }
 
     painter.text(
@@ -317,7 +344,7 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         Align2::LEFT_TOP,
         "Click select | Ctrl+Click add/remove | Left drag rotate | Right/Middle drag pan | Wheel zoom",
         FontId::proportional(13.0),
-        Color32::from_rgb(70, 74, 80),
+        pal.text_muted,
     );
 
     interaction
@@ -337,6 +364,7 @@ fn render_molecules_cpu(
     selection: &AtomSelection,
     visual_state: &ViewportVisualState,
     cache: &mut ViewportCache,
+    pal: crate::frontend::theme::Palette,
 ) -> Vec<PickTarget> {
     let geometry = cached_geometry(&mut cache.geometry, cache_key, structure, viewport);
     let scene_result = RepresentationComposer::for_viewport(
@@ -360,7 +388,7 @@ fn render_molecules_cpu(
                 structure.atoms.len()
             ),
             FontId::proportional(16.0),
-            Color32::from_rgb(150, 60, 60),
+            pal.status_red,
         );
     }
 

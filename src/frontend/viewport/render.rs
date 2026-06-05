@@ -78,6 +78,7 @@ pub(super) fn draw_hovered_atom_label(
     rect: Rect,
     structure: &Structure,
     atom_index: usize,
+    pal: crate::frontend::theme::Palette,
 ) {
     let atom = &structure.atoms[atom_index];
     let top_right = rect.right_top() + Vec2::new(-20.0, 20.0);
@@ -86,8 +87,10 @@ pub(super) fn draw_hovered_atom_label(
     let element_font = FontId::new(42.0, egui::FontFamily::Proportional);
     let number_font = FontId::new(18.0, egui::FontFamily::Proportional);
 
-    let element_color = Color32::from_rgb(25, 28, 32);
-    let number_color = Color32::from_rgb(70, 75, 82);
+    // HUD overlay drawn directly on the viewport with no backing box, so the
+    // text must follow the theme or it vanishes on the dark viewport.
+    let element_color = pal.text_strong;
+    let number_color = pal.text_muted;
 
     let element_galley = painter.layout(
         atom.element.clone(),

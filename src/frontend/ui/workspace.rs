@@ -15,20 +15,24 @@ pub(super) fn render_workspace(
     actions: &mut Vec<AppAction>,
 ) {
     if state.ui.layout.show_panel {
+        // Fixed height + driven by our own `panel_height`: egui 0.34's resizable
+        // `Panel` persists the framed content rect as the next frame's size, and
+        // with fill content that feeds back into a few-pixel-per-frame growth
+        // that runs away on continuous repaints. `exact_size` pins the height so
+        // it can't drift; the divider is resized by a custom handle (see
+        // `show_workbench`) that writes `panel_height`, matching the sidebars.
         egui::Panel::bottom("bottom_panel")
-            .default_size(state.ui.layout.panel_height)
-            .min_size(120.0)
-            .resizable(true)
+            .exact_size(state.ui.layout.panel_height)
             .frame(
                 Frame::default()
-                    .fill(egui::Color32::from_rgb(248, 249, 251))
+                    .fill(crate::frontend::theme::palette(ui).bottom_panel)
                     .inner_margin(Margin::symmetric(10, 8)),
             )
             .show_inside(ui, |ui| render_bottom_panel(state, ui, actions));
     }
 
     egui::CentralPanel::default()
-        .frame(Frame::default().fill(egui::Color32::from_rgb(245, 247, 249)))
+        .frame(Frame::default().fill(crate::frontend::theme::palette(ui).central))
         .show_inside(ui, |ui| {
             if let Some(entry) = state.entries.active_entry() {
                 let structure_id = entry.id;
@@ -104,6 +108,7 @@ pub(super) fn render_workspace(
 fn render_scratch_workspace(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let content_width = ui.available_width().min(420.0);
     let recent_projects = state.recent_projects.clone();
+    let pal = crate::frontend::theme::palette(ui);
 
     ui.vertical_centered(|ui| {
         ui.add_space(42.0);
@@ -112,7 +117,7 @@ fn render_scratch_workspace(state: &mut AppState, ui: &mut egui::Ui, actions: &m
         ui.add_space(4.0);
         ui.label(
             RichText::new("This workspace is not stored after Phonon closes.")
-                .color(egui::Color32::from_rgb(92, 100, 112)),
+                .color(pal.text_muted),
         );
         ui.add_space(24.0);
 
@@ -145,7 +150,7 @@ fn render_scratch_workspace(state: &mut AppState, ui: &mut egui::Ui, actions: &m
         ui.add_space(10.0);
 
         if recent_projects.is_empty() {
-            ui.label(RichText::new("No recent projects.").color(egui::Color32::GRAY));
+            ui.label(RichText::new("No recent projects.").color(pal.text_tertiary));
             return;
         }
 
@@ -156,22 +161,22 @@ fn render_scratch_workspace(state: &mut AppState, ui: &mut egui::Ui, actions: &m
                 ui.set_width(content_width);
                 for project in recent_projects {
                     let response = Frame::default()
-                        .fill(egui::Color32::from_rgb(249, 251, 253))
-                        .stroke(Stroke::new(1.0, egui::Color32::from_rgb(226, 232, 240)))
+                        .fill(pal.item_fill)
+                        .stroke(Stroke::new(1.0, pal.hairline))
                         .inner_margin(Margin::symmetric(12, 9))
                         .show(ui, |ui| {
                             ui.set_width(content_width - 24.0);
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(egui_phosphor::regular::FOLDER_OPEN)
-                                        .color(egui::Color32::from_rgb(66, 113, 181)),
+                                        .color(pal.accent),
                                 );
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new(&project.name).strong());
                                     ui.label(
                                         RichText::new(project.path.display().to_string())
                                             .small()
-                                            .color(egui::Color32::from_rgb(102, 110, 120)),
+                                            .color(pal.text_tertiary),
                                     );
                                 });
                             });
@@ -197,19 +202,20 @@ fn render_scratch_action_button(
     let width = ui.available_width();
     let response = ui
         .scope(|ui| {
+            let pal = crate::frontend::theme::palette(ui);
             let visuals = &mut ui.style_mut().visuals.widgets;
-            visuals.inactive.weak_bg_fill = egui::Color32::from_rgb(249, 251, 253);
-            visuals.inactive.bg_fill = egui::Color32::from_rgb(249, 251, 253);
-            visuals.inactive.bg_stroke = Stroke::new(1.0, egui::Color32::from_rgb(226, 232, 240));
-            visuals.hovered.weak_bg_fill = egui::Color32::from_rgb(242, 247, 252);
-            visuals.hovered.bg_fill = egui::Color32::from_rgb(242, 247, 252);
-            visuals.hovered.bg_stroke = Stroke::new(1.0, egui::Color32::from_rgb(198, 211, 228));
+            visuals.inactive.weak_bg_fill = pal.item_fill;
+            visuals.inactive.bg_fill = pal.item_fill;
+            visuals.inactive.bg_stroke = Stroke::new(1.0, pal.hairline);
+            visuals.hovered.weak_bg_fill = pal.item_fill_hover;
+            visuals.hovered.bg_fill = pal.item_fill_hover;
+            visuals.hovered.bg_stroke = Stroke::new(1.0, pal.hairline);
             ui.add_sized(
                 [width, 44.0],
                 Button::new(
                     RichText::new(format!("{icon}  {label}"))
                         .size(14.0)
-                        .color(egui::Color32::from_rgb(32, 37, 43)),
+                        .color(pal.text_primary),
                 ),
             )
         })

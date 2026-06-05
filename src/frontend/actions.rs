@@ -100,4 +100,6 @@ pub enum AppAction {
     ClearEngineOverride(crate::engines::registry::EngineId),
     BrowseEngineProgram(crate::engines::registry::EngineId),
     RunConsoleCommand(String),
+    /// Set the light/dark appearance preference and persist it.
+    SetThemeMode(crate::backend::config::ThemeMode),
 }
