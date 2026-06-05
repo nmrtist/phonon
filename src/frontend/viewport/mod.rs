@@ -97,9 +97,10 @@ impl GpuInstanceKey {
     }
 }
 
-/// Hash only the styling that changes ball-and-stick instances (per-category and
-/// per-atom style overrides, plus ion visibility/color); surface/cartoon/lighting
-/// fields do not affect the GPU instance set.
+/// Hash the styling that changes the GPU scene: per-category and per-atom style
+/// overrides, ion visibility/color, cartoon ribbon geometry, surface settings,
+/// and chain colors. Only the lighting preset and background are excluded (they
+/// do not change geometry). Camera state is excluded by construction.
 fn hash_visual_state(visual_state: &ViewportVisualState) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -121,6 +122,28 @@ fn hash_visual_state(visual_state: &ViewportVisualState) -> u64 {
         .color
         .map(|color| color.to_array())
         .hash(&mut hasher);
+
+    let cartoon = &visual_state.cartoon;
+    for section in [cartoon.helix, cartoon.sheet, cartoon.coil] {
+        section.width.to_bits().hash(&mut hasher);
+        section.thickness.to_bits().hash(&mut hasher);
+    }
+    cartoon.smoothing.hash(&mut hasher);
+    cartoon.profile_segments.hash(&mut hasher);
+
+    visual_state.surface.style.hash(&mut hasher);
+    visual_state
+        .surface
+        .transparency
+        .to_bits()
+        .hash(&mut hasher);
+    for chain in &visual_state.surface.chains {
+        chain.hash(&mut hasher);
+    }
+    for (chain, color) in &visual_state.chain_colors {
+        chain.hash(&mut hasher);
+        color.to_array().hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -166,11 +189,13 @@ pub struct ViewportDrawArgs<'a> {
     pub gpu_ready: bool,
 }
 
-/// Whether the GPU ball-and-stick path can render this scene. It covers spheres
-/// and stick bonds; cartoon and molecular-surface representations still go
-/// through the CPU compositor.
-fn gpu_path_supported(structure: &Structure, visual_state: &ViewportVisualState) -> bool {
-    !any_atoms_drawn_as_cartoon(structure, visual_state) && visual_state.surface.chains.is_empty()
+/// Whether the GPU path can render this scene. It covers spheres, stick bonds,
+/// cartoon ribbons, and filled molecular surfaces. The wireframe ("mesh")
+/// surface style still uses the CPU line rasterizer, so those scenes fall back.
+fn gpu_path_supported(visual_state: &ViewportVisualState) -> bool {
+    let mesh_surface =
+        !visual_state.surface.chains.is_empty() && visual_state.surface.style == SurfaceStyle::Mesh;
+    !mesh_surface
 }
 
 pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportInteraction {
@@ -225,7 +250,7 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         camera: *camera,
         show_cell: visual_state.show_cell,
     };
-    let pick_targets = if gpu_ready && gpu_path_supported(structure, visual_state) {
+    let pick_targets = if gpu_ready && gpu_path_supported(visual_state) {
         render_molecules_gpu(
             &painter,
             rect,
@@ -236,7 +261,7 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
             structure_revision,
             selection,
             visual_state,
-            &mut cache.gpu,
+            cache,
         )
     } else {
         render_molecules_cpu(
@@ -356,7 +381,7 @@ fn render_molecules_gpu(
     structure_revision: u64,
     selection: &AtomSelection,
     visual_state: &ViewportVisualState,
-    gpu_cache: &mut GpuViewCache,
+    cache: &mut ViewportCache,
 ) -> Vec<PickTarget> {
     if visual_state.show_cell
         && let Some(cell) = &structure.cell
@@ -370,17 +395,26 @@ fn render_molecules_gpu(
 
     let instance_key =
         GpuInstanceKey::new(structure_id, structure_revision, visual_state, selection);
-    let upload = if gpu_cache.instance_key == Some(instance_key) {
+    let upload = if cache.gpu.instance_key == Some(instance_key) {
         None
     } else {
-        gpu_cache.instance_key = Some(instance_key);
-        Some(build_molecule_instances(structure, selection, visual_state))
+        cache.gpu.instance_key = Some(instance_key);
+        let mut scene = build_molecule_instances(structure, selection, visual_state);
+        let surface_key = SurfaceCacheKey {
+            structure_id,
+            structure_revision,
+            style: visual_state.surface.style,
+            surface_chains: visual_state.surface.chains.iter().copied().collect(),
+        };
+        scene.surface =
+            build_surface_world_mesh(structure, &surface_key, visual_state, &mut cache.surface);
+        Some(scene)
     };
     gpu::emit(painter, rect, viewport, upload);
 
-    if gpu_cache.pick_key.as_ref() != Some(&cache_key) {
-        gpu_cache.pick_targets = project_pick_targets(structure, viewport);
-        gpu_cache.pick_key = Some(cache_key);
+    if cache.gpu.pick_key.as_ref() != Some(&cache_key) {
+        cache.gpu.pick_targets = project_pick_targets(structure, viewport);
+        cache.gpu.pick_key = Some(cache_key);
     }
-    gpu_cache.pick_targets.clone()
+    cache.gpu.pick_targets.clone()
 }

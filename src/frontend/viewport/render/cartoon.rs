@@ -12,6 +12,7 @@ use crate::{
 };
 
 use super::super::camera::Projector;
+use super::super::gpu::MeshVertex;
 use super::backend::{LineSegmentPrimitive, RenderScene};
 use super::{
     PrimitiveMeshVertex, PrimitiveTriangle, ViewportVisualState, chain_color, darken,
@@ -20,6 +21,11 @@ use super::{
 };
 
 const CARTOON_DEPTH_BUFFER_RESOLUTION: usize = 384;
+
+/// Corner-rounding of the swept ribbon cross-section, as a fraction of the
+/// half-thickness. Wide/thin styles (helix, sheet) become flat ribbons with
+/// rounded edges; round styles (coil, where width≈thickness) become tubes.
+const CARTOON_ROUNDNESS: f32 = 0.85;
 
 pub(crate) struct ScreenDepthBuffer {
     pub(super) bounds: Rect,
@@ -48,6 +54,7 @@ struct CartoonControlPoint {
     style: CartoonStyle,
     color: Color32,
     orientation_hint: Option<Vector3<f32>>,
+    kind: CartoonSegmentKind,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +65,7 @@ struct CartoonSweepSample {
     normal: Vector3<f32>,
     style: CartoonStyle,
     color: Color32,
+    kind: CartoonSegmentKind,
 }
 
 #[derive(Clone, Copy)]
@@ -95,7 +103,7 @@ pub(crate) fn build_biopolymer_cartoon_scene(
             append_cartoon_silhouette(
                 &mut lines,
                 viewport,
-                &fragment.controls,
+                &fragment.samples,
                 visual_state.lighting.silhouette_width,
             );
         }
@@ -130,14 +138,47 @@ pub(super) fn mesh_sample_visible(depth_buffer: &ScreenDepthBuffer, pos: Pos2, d
     }
 }
 
+/// Build the world-space cartoon mesh (position, normal, color triangle soup)
+/// for the GPU mesh pipeline. Camera-independent.
+pub(crate) fn build_biopolymer_cartoon_world_mesh(
+    structure: &Structure,
+    visual_state: &ViewportVisualState,
+) -> Vec<MeshVertex> {
+    let Some(biopolymer) = usable_biopolymer(structure) else {
+        return Vec::new();
+    };
+    let segments = visual_state.cartoon.profile_segments.clamp(6, 48);
+    let mut mesh = Vec::new();
+    for samples in cartoon_chain_sweeps(structure, biopolymer, visual_state) {
+        append_cartoon_world_fragment(&mut mesh, &samples, segments);
+    }
+    mesh
+}
+
 fn cartoon_fragments(
     structure: &Structure,
     biopolymer: &Biopolymer,
     viewport: &Projector,
     visual_state: &ViewportVisualState,
 ) -> Vec<CartoonFragment> {
-    let mut fragments_out = Vec::new();
+    cartoon_chain_sweeps(structure, biopolymer, visual_state)
+        .into_iter()
+        .map(|samples| CartoonFragment {
+            triangles: build_cartoon_triangles(viewport, &samples, visual_state),
+            samples,
+        })
+        .collect()
+}
 
+/// The per-fragment ribbon sweep samples (smoothed spline frames with cross-
+/// section styles) for every drawable chain. Shared by the CPU rasterizer and
+/// the GPU mesh builder so the two stay geometrically identical.
+fn cartoon_chain_sweeps(
+    structure: &Structure,
+    biopolymer: &Biopolymer,
+    visual_state: &ViewportVisualState,
+) -> Vec<Vec<CartoonSweepSample>> {
+    let mut sweeps = Vec::new();
     for (chain_index, chain) in biopolymer.chains.iter().enumerate() {
         let chain_color = visual_state
             .chain_colors
@@ -166,25 +207,54 @@ fn cartoon_fragments(
                         style: cartoon_style(kind, &visual_state.cartoon),
                         color: cartoon_segment_color(chain_color, kind),
                         orientation_hint: cartoon_orientation_hint(fragment, fragment_index, kind),
+                        kind,
                     }
                 })
                 .collect::<Vec<_>>();
 
             let smoothed = smooth_cartoon_controls(&controls, visual_state.cartoon.smoothing);
-            let sweep_samples = build_cartoon_sweep_samples(&smoothed);
-            fragments_out.push(CartoonFragment {
-                controls: smoothed,
-                triangles: build_cartoon_triangles(viewport, &sweep_samples, visual_state),
-            });
+            let mut samples = build_cartoon_sweep_samples(&smoothed);
+            apply_sheet_arrows(&mut samples, visual_state.cartoon.smoothing.max(2));
+            sweeps.push(samples);
         }
     }
-
-    fragments_out
+    sweeps
 }
 
 struct CartoonFragment {
-    controls: Vec<CartoonControlPoint>,
+    samples: Vec<CartoonSweepSample>,
     triangles: Vec<PrimitiveTriangle>,
+}
+
+/// Widen sheet strands into an arrowhead near their C-terminal end: the ribbon
+/// steps out to wide "barbs" at the arrow base then tapers to a point at the
+/// tip, the iconic cue for β-strand directionality.
+fn apply_sheet_arrows(samples: &mut [CartoonSweepSample], subdivisions: usize) {
+    const ARROW_BASE_SCALE: f32 = 1.75;
+    const ARROW_TIP_SCALE: f32 = 0.05;
+    let arrow_len = ((subdivisions as f32 * 1.6).round() as usize).max(3);
+
+    let mut index = 0;
+    while index < samples.len() {
+        if samples[index].kind != CartoonSegmentKind::Sheet {
+            index += 1;
+            continue;
+        }
+        let run_start = index;
+        while index < samples.len() && samples[index].kind == CartoonSegmentKind::Sheet {
+            index += 1;
+        }
+        let run_end = index;
+        if run_end - run_start < arrow_len + 1 {
+            continue;
+        }
+        let base = run_end - arrow_len;
+        for (step, sample_index) in (base..run_end).enumerate() {
+            let t = step as f32 / (arrow_len - 1) as f32;
+            let scale = ARROW_BASE_SCALE + (ARROW_TIP_SCALE - ARROW_BASE_SCALE) * t;
+            samples[sample_index].style.half_width *= scale;
+        }
+    }
 }
 
 fn chain_residue_trace(
@@ -236,35 +306,34 @@ fn chain_contiguous_fragments(
     fragments
 }
 
+/// Orient the flat ribbon face using the local backbone curvature: the binormal
+/// of the CA trace. Helices coil so this points radially outward; β-strands
+/// pleat so it follows the strand's peptide-plane normal. Straight runs give a
+/// near-zero binormal (`None`), and the parallel-transported frame carries the
+/// previous orientation across them.
 fn cartoon_orientation_hint(
     fragment: &[ChainResiduePoint],
     index: usize,
-    kind: CartoonSegmentKind,
+    _kind: CartoonSegmentKind,
 ) -> Option<Vector3<f32>> {
     if fragment.len() < 3 {
         return None;
     }
-    match kind {
-        CartoonSegmentKind::Helix | CartoonSegmentKind::Coil => {
-            let previous = if index > 0 {
-                fragment[index - 1].position
-            } else {
-                fragment[index].position
-            };
-            let current = fragment[index].position;
-            let next = if index + 1 < fragment.len() {
-                fragment[index + 1].position
-            } else {
-                fragment[index].position
-            };
-            let incoming = current - previous;
-            let outgoing = next - current;
-            let normal = incoming.cross(&outgoing);
-            (normal.norm_squared() > 0.0001)
-                .then(|| normalize_vector3(normal, Vector3::new(0.0, 1.0, 0.0)))
-        }
-        CartoonSegmentKind::Sheet => None,
-    }
+    let previous = if index > 0 {
+        fragment[index - 1].position
+    } else {
+        fragment[index].position
+    };
+    let current = fragment[index].position;
+    let next = if index + 1 < fragment.len() {
+        fragment[index + 1].position
+    } else {
+        fragment[index].position
+    };
+    let incoming = current - previous;
+    let outgoing = next - current;
+    let normal = incoming.cross(&outgoing);
+    (normal.norm_squared() > 0.0001).then(|| normalize_vector3(normal, Vector3::new(0.0, 1.0, 0.0)))
 }
 
 fn residue_cartoon_kind(
@@ -345,6 +414,7 @@ fn smooth_cartoon_controls(
                     p2.orientation_hint,
                     eased,
                 ),
+                kind: if eased < 0.5 { p1.kind } else { p2.kind },
             });
         }
     }
@@ -407,6 +477,7 @@ fn build_cartoon_sweep_samples(controls: &[CartoonControlPoint]) -> Vec<CartoonS
         normal,
         style: controls[0].style,
         color: controls[0].color,
+        kind: controls[0].kind,
     });
 
     for index in 1..controls.len() {
@@ -431,6 +502,7 @@ fn build_cartoon_sweep_samples(controls: &[CartoonControlPoint]) -> Vec<CartoonS
             normal,
             style: controls[index].style,
             color: controls[index].color,
+            kind: controls[index].kind,
         });
     }
 
@@ -495,37 +567,160 @@ fn build_cartoon_triangles(
     triangles
 }
 
+/// A point on the swept ribbon cross-section: a 2D offset in the (side, normal)
+/// frame and the 2D outward normal in that frame. The outline is the boundary of
+/// a rounded rectangle (Minkowski sum of a rectangle and a disc), so wide/thin
+/// styles read as flat ribbons with rounded edges and round styles as tubes.
+#[derive(Clone, Copy)]
+struct CrossSectionPoint {
+    offset: [f32; 2],
+    normal: [f32; 2],
+}
+
+fn ribbon_cross_section(style: CartoonStyle, segments: usize) -> Vec<CrossSectionPoint> {
+    let half_width = style.half_width.max(0.02);
+    let half_thickness = style.half_thickness.max(0.02);
+    let radius = CARTOON_ROUNDNESS * half_width.min(half_thickness);
+    let inner_width = (half_width - radius).max(0.0);
+    let inner_thickness = (half_thickness - radius).max(0.0);
+    (0..segments)
+        .map(|index| {
+            // The half-step offset keeps samples off the exact axis directions,
+            // where the rounded-rectangle support mapping is ambiguous, so the
+            // flat faces come out as clean chords between corner samples.
+            let angle = TAU * (index as f32 + 0.5) / segments as f32;
+            let (sin_angle, cos_angle) = angle.sin_cos();
+            CrossSectionPoint {
+                offset: [
+                    cos_angle.signum() * inner_width + radius * cos_angle,
+                    sin_angle.signum() * inner_thickness + radius * sin_angle,
+                ],
+                normal: [cos_angle, sin_angle],
+            }
+        })
+        .collect()
+}
+
+/// World-space (position, outward normal) ring for the swept cross-section at one
+/// sweep sample.
+fn cartoon_ring_geometry(
+    sample: &CartoonSweepSample,
+    segments: usize,
+) -> Vec<(Point3<f32>, Vector3<f32>)> {
+    ribbon_cross_section(sample.style, segments)
+        .iter()
+        .map(|cross_section| {
+            let position = sample.position
+                + sample.side * cross_section.offset[0]
+                + sample.normal * cross_section.offset[1];
+            let normal = normalize_vector3(
+                sample.side * cross_section.normal[0] + sample.normal * cross_section.normal[1],
+                sample.normal,
+            );
+            (position, normal)
+        })
+        .collect()
+}
+
 fn build_cartoon_ring(
     viewport: &Projector,
     sample: &CartoonSweepSample,
     segments: usize,
     visual_state: &ViewportVisualState,
 ) -> Vec<PrimitiveMeshVertex> {
-    let mut ring = Vec::with_capacity(segments);
-    for index in 0..segments {
-        let angle = index as f32 * TAU / segments as f32;
-        let (sin_angle, cos_angle) = angle.sin_cos();
-        let offset = sample.side * (cos_angle * sample.style.half_width)
-            + sample.normal * (sin_angle * sample.style.half_thickness);
-        let position = sample.position + offset;
-        let normal = normalize_vector3(
-            sample.side * (cos_angle / sample.style.half_width.max(0.15))
-                + sample.normal * (sin_angle / sample.style.half_thickness.max(0.15)),
-            sample.normal,
-        );
-        let projected = viewport.project(position);
-        ring.push(PrimitiveMeshVertex {
-            pos: projected.pos,
-            depth: projected.depth,
-            color: shade_cartoon_color(
-                viewport,
-                sample.color,
-                normal,
-                visual_state.lighting.preset,
-            ),
-        });
+    cartoon_ring_geometry(sample, segments)
+        .into_iter()
+        .map(|(position, normal)| {
+            let projected = viewport.project(position);
+            PrimitiveMeshVertex {
+                pos: projected.pos,
+                depth: projected.depth,
+                color: shade_cartoon_color(
+                    viewport,
+                    sample.color,
+                    normal,
+                    visual_state.lighting.preset,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn mesh_vertex(position: Point3<f32>, normal: Vector3<f32>, color: [f32; 4]) -> MeshVertex {
+    MeshVertex {
+        position: [position.x, position.y, position.z],
+        normal: [normal.x, normal.y, normal.z],
+        color,
     }
-    ring
+}
+
+/// Append one ribbon fragment to the GPU world mesh: a tube/ribbon swept along
+/// the spline plus flat end caps.
+fn append_cartoon_world_fragment(
+    mesh: &mut Vec<MeshVertex>,
+    samples: &[CartoonSweepSample],
+    segments: usize,
+) {
+    if samples.len() < 2 {
+        return;
+    }
+    let rings = samples
+        .iter()
+        .map(|sample| cartoon_ring_geometry(sample, segments))
+        .collect::<Vec<_>>();
+    let colors = samples
+        .iter()
+        .map(|sample| sample.color.to_normalized_gamma_f32())
+        .collect::<Vec<_>>();
+
+    for ring_index in 0..rings.len() - 1 {
+        let current = &rings[ring_index];
+        let next = &rings[ring_index + 1];
+        let color_current = colors[ring_index];
+        let color_next = colors[ring_index + 1];
+        for index in 0..segments {
+            let next_index = (index + 1) % segments;
+            let a = mesh_vertex(current[index].0, current[index].1, color_current);
+            let b = mesh_vertex(next[index].0, next[index].1, color_next);
+            let c = mesh_vertex(next[next_index].0, next[next_index].1, color_next);
+            let d = mesh_vertex(current[next_index].0, current[next_index].1, color_current);
+            mesh.extend([a, b, c, a, c, d]);
+        }
+    }
+
+    append_cartoon_world_cap(
+        mesh,
+        &rings[0],
+        samples[0].position,
+        -samples[0].tangent,
+        colors[0],
+    );
+    let last = rings.len() - 1;
+    append_cartoon_world_cap(
+        mesh,
+        &rings[last],
+        samples[last].position,
+        samples[last].tangent,
+        colors[last],
+    );
+}
+
+fn append_cartoon_world_cap(
+    mesh: &mut Vec<MeshVertex>,
+    ring: &[(Point3<f32>, Vector3<f32>)],
+    center: Point3<f32>,
+    cap_normal: Vector3<f32>,
+    color: [f32; 4],
+) {
+    let center_vertex = mesh_vertex(center, cap_normal, color);
+    for index in 0..ring.len() {
+        let next_index = (index + 1) % ring.len();
+        mesh.extend([
+            center_vertex,
+            mesh_vertex(ring[next_index].0, cap_normal, color),
+            mesh_vertex(ring[index].0, cap_normal, color),
+        ]);
+    }
 }
 
 fn append_cartoon_cap(
@@ -557,10 +752,10 @@ fn append_cartoon_cap(
 fn append_cartoon_silhouette(
     lines: &mut Vec<LineSegmentPrimitive>,
     viewport: &Projector,
-    controls: &[CartoonControlPoint],
+    samples: &[CartoonSweepSample],
     width: f32,
 ) {
-    for pair in controls.windows(2) {
+    for pair in samples.windows(2) {
         let start = viewport.project(pair[0].position).pos;
         let end = viewport.project(pair[1].position).pos;
         let local_width = pair[0].style.half_width.max(pair[0].style.half_thickness)

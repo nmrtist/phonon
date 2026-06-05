@@ -215,3 +215,41 @@ fn cylinder_vs(in: CylinderIn) -> CylinderOut {
 fn cylinder_fs(in: CylinderOut) -> @location(0) vec4<f32> {
     return frame_color(shade(in.color, in.normal_view));
 }
+
+// ---------------------------------------------------------------------------
+// General triangle mesh (cartoon ribbons + molecular surface). Vertices carry a
+// world position, world normal, and rgba color; depth uses the shared mapping so
+// meshes interpenetrate the spheres/cylinders correctly. Lit two-sided so thin
+// ribbons and the inside of a translucent surface stay shaded.
+
+struct MeshIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+};
+
+struct MeshOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) normal_view: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn mesh_vs(in: MeshIn) -> MeshOut {
+    let view = to_view(in.position);
+    var out: MeshOut;
+    out.clip = vec4<f32>(view_to_ndc(view), depth_ndc(view.z), 1.0);
+    out.normal_view = (camera.rotation * vec4<f32>(in.normal, 0.0)).xyz;
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn mesh_fs(in: MeshOut) -> @location(0) vec4<f32> {
+    var n = in.normal_view;
+    if n.z < 0.0 {
+        n = -n;
+    }
+    let lit = frame_color(shade(in.color.rgb, n));
+    return vec4<f32>(lit.rgb, in.color.a);
+}

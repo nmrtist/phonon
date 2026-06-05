@@ -33,7 +33,9 @@ pub(super) use scene::{
     PickTarget, ViewportGeometry, build_viewport_geometry, cached_geometry, pick_atom,
     project_pick_targets,
 };
-pub(super) use surface::{SurfaceSceneGeometry, build_cached_surface_scene, build_surface_scene};
+pub(super) use surface::{
+    SurfaceSceneGeometry, build_cached_surface_scene, build_surface_scene, build_surface_world_mesh,
+};
 
 const BALL_RADIUS_SCALE: f32 = 0.78;
 const SPHERE_LATITUDE_SEGMENTS: usize = 10;
