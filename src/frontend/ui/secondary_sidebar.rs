@@ -27,6 +27,7 @@ fn render_secondary_sidebar_content(
     ui: &mut egui::Ui,
     actions: &mut Vec<AppAction>,
 ) {
+    let pal = crate::frontend::theme::palette(ui);
     let panels = state
         .tasks
         .panels
@@ -43,7 +44,7 @@ fn render_secondary_sidebar_content(
                     [28.0, 28.0],
                     Button::new(
                         RichText::new(egui_phosphor::regular::CARET_RIGHT)
-                            .color(core_button_text_color(false)),
+                            .color(core_button_text_color(&pal, false)),
                     ),
                 )
             })
@@ -67,11 +68,7 @@ fn render_secondary_sidebar_content(
                     Frame::group(ui.style())
                         .stroke(Stroke::new(
                             1.0,
-                            if active {
-                                egui::Color32::from_rgb(66, 113, 181)
-                            } else {
-                                egui::Color32::from_rgb(198, 205, 214)
-                            },
+                            if active { pal.accent } else { pal.hairline },
                         ))
                         .inner_margin(Margin::symmetric(6, 4))
                         .show(ui, |ui| {
@@ -114,7 +111,7 @@ fn render_secondary_sidebar_content(
             task.theme, task.method, task.application
         ))
         .small()
-        .color(egui::Color32::GRAY),
+        .color(pal.text_tertiary),
     );
     ui.separator();
 

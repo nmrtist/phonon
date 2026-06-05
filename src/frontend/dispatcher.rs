@@ -129,6 +129,7 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::ClearEngineOverride(id) => clear_engine_override(state, id),
         AppAction::BrowseEngineProgram(id) => browse_engine_program(state, id),
         AppAction::RunConsoleCommand(command) => run_console_command(state, &command),
+        AppAction::SetThemeMode(mode) => set_theme_mode(state, mode, ctx),
     }
     if let Some(before) = fingerprint_before
         && state.entries_fingerprint() != before
@@ -140,6 +141,20 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         // explicit checkpoints (save, open, close, shutdown).
         let now = ctx.input(|input| input.time);
         state.request_autosave(now, AUTOSAVE_DEBOUNCE_SECS);
+    }
+}
+
+/// Apply and persist the light/dark appearance preference. egui switches the
+/// active theme immediately; the choice is written to the global settings file.
+fn set_theme_mode(
+    state: &mut AppState,
+    mode: crate::backend::config::ThemeMode,
+    ctx: &egui::Context,
+) {
+    state.config.theme = mode;
+    crate::frontend::theme::set_preference(ctx, mode);
+    if let Err(error) = save_config(&state.config) {
+        state.set_message(format!("Could not save theme preference: {error}"));
     }
 }
 

@@ -41,6 +41,7 @@ pub fn run(structure: Structure, source_path: Option<PathBuf>) -> Result<()> {
                 crate::frontend::viewport::init_gpu_renderer(render_state);
                 app.state.ui.gpu_ready = true;
             }
+            crate::frontend::theme::set_preference(&cc.egui_ctx, app.state.config.theme);
             Ok(Box::new(app))
         }),
     )
@@ -257,17 +258,21 @@ impl eframe::App for PhononApp {
 
     /// Backing color behind the UI.
     ///
-    /// macOS backing is opaque and matched to the central panel fill, so the
-    /// native title bar shows no seam and the native shadow stays intact. Other
+    /// macOS backing is opaque and matched to the active theme's window backing
+    /// (which equals the central panel fill), so the native title bar shows no
+    /// seam and the native shadow stays intact, in light or dark. Other
     /// platforms use a transparent backing so the app-drawn rounded corners read
     /// as empty (revealing the desktop behind them).
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         #[cfg(target_os = "macos")]
         {
-            crate::frontend::theme::CENTRAL_PANEL_FILL.to_normalized_gamma_f32()
+            crate::frontend::theme::Palette::for_dark_mode(visuals.dark_mode)
+                .window_backing
+                .to_normalized_gamma_f32()
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = visuals;
             [0.0, 0.0, 0.0, 0.0]
         }
     }

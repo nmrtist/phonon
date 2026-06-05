@@ -10,6 +10,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::engines::registry::EngineLaunch;
 
+/// How the interface picks its light/dark appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThemeMode {
+    /// Follow the operating system appearance, switching live with it.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    pub const fn all() -> [ThemeMode; 3] {
+        [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark]
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            ThemeMode::System => "Follow system",
+            ThemeMode::Light => "Light",
+            ThemeMode::Dark => "Dark",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub default_project_dir: PathBuf,
@@ -21,6 +45,9 @@ pub struct AppConfig {
     /// non-PATH native install.
     #[serde(default)]
     pub engine_overrides: HashMap<String, EngineLaunch>,
+    /// Light/dark preference. Defaults to following the system.
+    #[serde(default)]
+    pub theme: ThemeMode,
 }
 
 impl Default for AppConfig {
@@ -30,6 +57,7 @@ impl Default for AppConfig {
             last_project_path: None,
             closed_to_scratch: false,
             engine_overrides: HashMap::default(),
+            theme: ThemeMode::default(),
         }
     }
 }

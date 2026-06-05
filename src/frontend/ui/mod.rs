@@ -34,6 +34,7 @@ const WINDOW_CORNER_RADIUS: u8 = 10;
 
 pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let ctx = ui.ctx().clone();
+    let pal = crate::frontend::theme::palette(ui);
 
     render_window_resize_handles(&ctx);
 
@@ -59,7 +60,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         .exact_size(32.0)
         .frame(
             Frame::default()
-                .fill(egui::Color32::from_rgb(246, 248, 251))
+                .fill(pal.title_bar)
                 .corner_radius(top_corners)
                 .inner_margin(Margin::symmetric(8, 3)),
         )
@@ -69,7 +70,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         .exact_size(24.0)
         .frame(
             Frame::default()
-                .fill(egui::Color32::from_rgb(229, 236, 244))
+                .fill(pal.status_bar)
                 .corner_radius(bottom_corners)
                 .inner_margin(Margin::symmetric(10, 3)),
         )
@@ -79,11 +80,16 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         .exact_size(52.0)
         .frame(
             Frame::default()
-                .fill(egui::Color32::from_rgb(240, 243, 247))
+                .fill(pal.activity_bar)
                 .inner_margin(Margin::symmetric(6, 10)),
         )
         .show_inside(ui, |ui| render_activity_bar(state, ui));
 
+    // Sidebars use egui's built-in resizable panels: unlike a custom overlay
+    // handle, the native resize takes priority over the panel's own scroll bar
+    // at the shared edge (egui runs the resize interaction on top of the
+    // contents), so dragging the divider always resizes instead of catching the
+    // scroll bar. The harsh near-white hover line is softened in `theme.rs`.
     if state.ui.layout.show_primary_sidebar {
         egui::Panel::left("primary_sidebar")
             .default_size(state.ui.layout.primary_sidebar_width)
@@ -91,13 +97,12 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .resizable(true)
             .frame(
                 Frame::default()
-                    .fill(egui::Color32::from_rgb(252, 252, 253))
+                    .fill(pal.sidebar)
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
-                let primary_sidebar_width = ui.available_width();
-                state.ui.layout.primary_sidebar_width = primary_sidebar_width;
-                ui.set_max_width(primary_sidebar_width);
+                state.ui.layout.primary_sidebar_width = ui.available_width();
+                ui.set_max_width(ui.available_width());
                 render_primary_sidebar(state, ui, actions);
             });
     }
@@ -109,7 +114,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .resizable(true)
             .frame(
                 Frame::default()
-                    .fill(egui::Color32::from_rgb(252, 252, 253))
+                    .fill(pal.sidebar)
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
@@ -121,10 +126,50 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
     egui::CentralPanel::default()
         .frame(
             Frame::default()
-                .fill(crate::frontend::theme::CENTRAL_PANEL_FILL)
+                .fill(pal.central)
                 .inner_margin(Margin::same(0)),
         )
         .show_inside(ui, |ui| render_workspace(state, ui, actions));
+
+    // The bottom panel is fixed-size (see `render_workspace`) to avoid egui's
+    // resizable-panel growth bug, so it gets a custom resize handle — a subtle
+    // centered pill on hover that drives `panel_height`. Its horizontal divider
+    // shares no edge with a scroll bar, so there's no grab conflict. (Sidebars
+    // use egui's native resize above.)
+    if state.ui.layout.show_panel {
+        let viewport_rect = ctx.viewport_rect();
+        let content_bottom = viewport_rect.bottom() - 24.0; // above the status bar
+        let workspace_left = viewport_rect.left()
+            + 52.0
+            + if state.ui.layout.show_primary_sidebar {
+                state.ui.layout.primary_sidebar_width
+            } else {
+                0.0
+            };
+        let workspace_right = viewport_rect.right()
+            - if state.ui.layout.show_secondary_sidebar {
+                state.ui.layout.secondary_sidebar_width
+            } else {
+                0.0
+            };
+        let y = content_bottom - state.ui.layout.panel_height;
+        let max_panel_height = (viewport_rect.height() * 0.6).max(160.0);
+        render_resize_divider(
+            &ctx,
+            "bottom_panel_resize",
+            DividerKind::Horizontal,
+            Rect::from_min_max(
+                egui::pos2(workspace_left + 10.0, y - 4.0),
+                egui::pos2(workspace_right - 10.0, y + 4.0),
+            ),
+            y,
+            &mut state.ui.layout.panel_height,
+            -1.0,
+            120.0,
+            max_panel_height,
+            &pal,
+        );
+    }
 
     // Hairline border hugging the rounded window. Painted last so it sits atop
     // the panel fills; `StrokeKind::Inside` keeps the full 1px within the window
@@ -286,6 +331,77 @@ fn render_resize_handle(ctx: &egui::Context, spec: ResizeHandleSpec) {
         });
 }
 
+/// Whether a resize divider runs vertically (between side-by-side panels, drags
+/// horizontally) or horizontally (between stacked panels, drags vertically).
+/// `Vertical` is currently unused (sidebars use egui's native resize) but kept
+/// so the helper stays general.
+#[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+enum DividerKind {
+    Vertical,
+    Horizontal,
+}
+
+/// Interactive resize handle for a panel divider. `hit_rect` is the slim
+/// interactive strip — biased to the *central* side of the divider so it never
+/// overlaps the panel's scroll bar (which would otherwise steal the drag).
+/// `divider` is the on-screen position of the divider line (x for a vertical
+/// divider, y for a horizontal one) where the pill is drawn. While hovered or
+/// dragged it shows a subtle pill (hidden otherwise) and adjusts `value` (a
+/// panel width or height) by the drag along the divider's axis. `sign` flips
+/// the direction (`-1.0` for a right/bottom panel whose size grows as the
+/// divider moves toward it).
+#[allow(clippy::too_many_arguments)]
+fn render_resize_divider(
+    ctx: &egui::Context,
+    id: &str,
+    kind: DividerKind,
+    hit_rect: Rect,
+    divider: f32,
+    value: &mut f32,
+    sign: f32,
+    min: f32,
+    max: f32,
+    pal: &crate::frontend::theme::Palette,
+) {
+    egui::Area::new(Id::new(id))
+        .order(Order::Foreground)
+        .fixed_pos(hit_rect.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (_, response) = ui.allocate_exact_size(hit_rect.size(), Sense::click_and_drag());
+            let active = response.hovered() || response.dragged();
+            if active {
+                ui.ctx().set_cursor_icon(match kind {
+                    DividerKind::Vertical => CursorIcon::ResizeHorizontal,
+                    DividerKind::Horizontal => CursorIcon::ResizeVertical,
+                });
+            }
+            if response.dragged() {
+                let delta = match kind {
+                    DividerKind::Vertical => response.drag_delta().x,
+                    DividerKind::Horizontal => response.drag_delta().y,
+                };
+                *value = (*value + sign * delta).clamp(min, max);
+            }
+            // A subtle pill on the divider line, shown only while interacted.
+            if active {
+                let pill = match kind {
+                    DividerKind::Vertical => Rect::from_center_size(
+                        egui::pos2(divider, hit_rect.center().y),
+                        egui::vec2(4.0, (hit_rect.height() * 0.16).clamp(20.0, 56.0)),
+                    ),
+                    DividerKind::Horizontal => Rect::from_center_size(
+                        egui::pos2(hit_rect.center().x, divider),
+                        egui::vec2((hit_rect.width() * 0.16).clamp(20.0, 56.0), 4.0),
+                    ),
+                };
+                ui.painter()
+                    .rect_filled(pill, egui::CornerRadius::same(2), pal.text_muted);
+            }
+        });
+}
+
 const CORE_BUTTON_CORNER_RADIUS: u8 = 4;
 const CORE_BUTTON_HOVER_ALPHA: u8 = 26;
 const CORE_BUTTON_SELECTED_ALPHA: u8 = 44;
@@ -296,8 +412,9 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
     let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
     let show_inline_menus = !cfg!(target_os = "macos");
     let has_active_entry = state.has_active_entry();
-    let title_color = egui::Color32::from_rgb(32, 37, 43);
-    let muted_text = egui::Color32::from_rgb(92, 100, 112);
+    let pal = crate::frontend::theme::palette(ui);
+    let title_color = pal.text_primary;
+    let muted_text = pal.text_muted;
     let centered_title = state.workspace_label();
     let title_bar_rect = ui.max_rect();
 
@@ -424,7 +541,7 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
                     ui.label(
                         RichText::new("Select by type")
                             .small()
-                            .color(egui::Color32::GRAY),
+                            .color(pal.text_tertiary),
                     );
                     for category in crate::domain::AtomCategory::selectable() {
                         if ui.button(category.label()).clicked() {
@@ -447,6 +564,16 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
                     );
                     ui.checkbox(&mut state.ui.layout.show_panel, "Panel");
                     ui.checkbox(&mut state.ui.viewport.show_atom_labels, "Show Atom Labels");
+                    ui.separator();
+                    ui.menu_button("Appearance", |ui| {
+                        let current = state.config.theme;
+                        for mode in crate::backend::config::ThemeMode::all() {
+                            if ui.radio(current == mode, mode.label()).clicked() {
+                                actions.push(AppAction::SetThemeMode(mode));
+                                ui.close();
+                            }
+                        }
+                    });
                     ui.separator();
                     let selection_len = state.ui.selection.len();
                     ui.label(if selection_len == 0 {
@@ -543,11 +670,12 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
 
     fn render_window_controls(ui: &mut Ui, maximized: bool) {
         let ctx = ui.ctx().clone();
+        let pal = crate::frontend::theme::palette(ui);
         for (icon, command, hover_fill) in [
             (
                 egui_phosphor::regular::X,
                 ViewportCommand::Close,
-                egui::Color32::from_rgb(232, 84, 82),
+                pal.status_red,
             ),
             (
                 if maximized {
@@ -556,12 +684,12 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
                     egui_phosphor::regular::CORNERS_OUT
                 },
                 ViewportCommand::Maximized(!maximized),
-                egui::Color32::from_rgb(228, 232, 238),
+                pal.item_fill_hover,
             ),
             (
                 egui_phosphor::regular::MINUS,
                 ViewportCommand::Minimized(true),
-                egui::Color32::from_rgb(228, 232, 238),
+                pal.item_fill_hover,
             ),
         ] {
             let response = window_control_button(ui, icon, hover_fill);
@@ -573,6 +701,7 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
 }
 
 fn render_activity_bar(state: &mut AppState, ui: &mut egui::Ui) {
+    let pal = crate::frontend::theme::palette(ui);
     ui.vertical_centered(|ui| {
         for view in PrimaryView::all() {
             let selected = state.ui.layout.active_primary_view == *view;
@@ -582,7 +711,7 @@ fn render_activity_bar(state: &mut AppState, ui: &mut egui::Ui) {
                     Button::new(
                         RichText::new(view.icon())
                             .strong()
-                            .color(core_button_text_color(selected)),
+                            .color(core_button_text_color(&pal, selected)),
                     )
                     .selected(selected),
                 )
@@ -601,6 +730,7 @@ fn render_activity_bar(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
+    let pal = crate::frontend::theme::palette(ui);
     ui.horizontal(|ui| {
         let btn_w = 28.0 + ui.spacing().item_spacing.x;
         let heading_w = (ui.available_width() - btn_w).max(0.0);
@@ -620,7 +750,7 @@ fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
                     [28.0, 28.0],
                     Button::new(
                         RichText::new(egui_phosphor::regular::CARET_LEFT)
-                            .color(core_button_text_color(false)),
+                            .color(core_button_text_color(&pal, false)),
                     ),
                 )
             })
@@ -641,6 +771,7 @@ fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
 }
 
 fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
+    let pal = crate::frontend::theme::palette(ui);
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if with_core_button_style(ui, false, |ui| {
@@ -649,7 +780,7 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                     Button::new(
                         RichText::new(egui_phosphor::regular::FILE_PLUS)
                             .size(13.0)
-                            .color(core_button_text_color(false)),
+                            .color(core_button_text_color(&pal, false)),
                     )
                     .frame(false),
                 )
@@ -665,7 +796,7 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                     Button::new(
                         RichText::new(egui_phosphor::regular::FOLDER_PLUS)
                             .size(13.0)
-                            .color(core_button_text_color(false)),
+                            .color(core_button_text_color(&pal, false)),
                     )
                     .frame(false),
                 )
@@ -681,7 +812,7 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                     Button::new(
                         RichText::new(egui_phosphor::regular::ARROWS_IN_SIMPLE)
                             .size(13.0)
-                            .color(core_button_text_color(false)),
+                            .color(core_button_text_color(&pal, false)),
                     )
                     .frame(false),
                 )
@@ -797,6 +928,11 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
 
     ScrollArea::vertical()
         .max_height(ui.available_height().max(120.0))
+        // Scroll only via wheel/trackpad; the scroll bar stays a non-interactive
+        // position indicator (Mac-native behaviour). This stops the bar from
+        // catching a drag that starts on the adjacent panel resize divider — the
+        // bug where dragging the divider scrolled instead of resizing.
+        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL)
         .show(ui, |ui| {
             for group in &groups {
                 let group_id = group.id.clone();
@@ -950,10 +1086,11 @@ fn render_group_header(
     );
 
     // Background (selection or hover): a rounded, inset, filled highlight.
+    let pal = crate::frontend::theme::palette(ui);
     let bg = if is_selected {
-        egui::Color32::from_rgba_unmultiplied(54, 97, 164, 40)
+        pal.blue_overlay(40)
     } else if row_resp.hovered() {
-        egui::Color32::from_rgba_unmultiplied(64, 70, 82, 30)
+        pal.neutral_overlay(30)
     } else {
         egui::Color32::TRANSPARENT
     };
@@ -963,7 +1100,7 @@ fn render_group_header(
     }
 
     // Paint the caret marker and folder icon.
-    let icon_color = egui::Color32::from_rgb(92, 100, 112);
+    let icon_color = pal.text_muted;
     let mut x = row_rect.left() + 4.0;
     let marker_galley = ui.painter().layout_no_wrap(
         marker.to_string(),
@@ -1021,7 +1158,7 @@ fn render_group_header(
             rename_done = true;
         }
     } else {
-        let name_color = egui::Color32::from_rgb(32, 37, 43);
+        let name_color = pal.text_primary;
         let avail = (row_rect.left() + left_w - x).max(0.0);
         let mut job = egui::text::LayoutJob::single_section(
             group_name.to_string(),
@@ -1284,21 +1421,22 @@ fn render_entry_list_item(
             ui.allocate_at_least(egui::vec2(full_width, 20.0), Sense::click_and_drag());
 
         let hovered = response.hovered();
+        let pal = crate::frontend::theme::palette(ui);
         let bg_fill = if is_workspace_active {
-            egui::Color32::from_rgba_unmultiplied(54, 97, 164, 80)
+            pal.blue_overlay(80)
         } else if is_selected {
-            egui::Color32::from_rgba_unmultiplied(54, 97, 164, 40)
+            pal.blue_overlay(40)
         } else if hovered {
-            egui::Color32::from_rgba_unmultiplied(64, 70, 82, 30)
+            pal.neutral_overlay(30)
         } else {
             egui::Color32::TRANSPARENT
         };
         let text_color = if is_workspace_active {
-            egui::Color32::from_rgb(18, 22, 30)
+            pal.text_strong
         } else if is_selected {
-            egui::Color32::from_rgb(32, 37, 43)
+            pal.text_primary
         } else {
-            egui::Color32::from_rgb(70, 78, 88)
+            pal.text_muted
         };
 
         ui.painter()
@@ -1461,101 +1599,98 @@ fn render_tasks_view(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
     ui.add_space(4.0);
 
     let search = state.tasks.task_list.search_query.to_lowercase();
-    ScrollArea::vertical().show(ui, |ui| {
-        for category in TASK_CATEGORIES {
-            let controllers = task_controllers()
-                .iter()
-                .copied()
-                .filter(|controller| task_category(controller.theme) == *category)
-                .filter(|controller| {
-                    search.is_empty()
-                        || controller.title.to_lowercase().contains(&search)
-                        || controller.short_title.to_lowercase().contains(&search)
-                        || controller.theme.to_lowercase().contains(&search)
-                        || controller.method.to_lowercase().contains(&search)
-                        || controller.application.to_lowercase().contains(&search)
-                })
-                .collect::<Vec<_>>();
-            if controllers.is_empty() {
-                continue;
-            }
-
-            // A search keeps every matching group expanded so results stay visible.
-            let collapsed =
-                search.is_empty() && state.tasks.task_list.collapsed_themes.contains(*category);
-            let marker = if collapsed {
-                egui_phosphor::regular::CARET_RIGHT
-            } else {
-                egui_phosphor::regular::CARET_DOWN
-            };
-
-            let header = ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 0.0),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    ui.label(
-                        RichText::new(marker)
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(92, 100, 112)),
-                    );
-                    ui.label(RichText::new(*category).strong());
-                    ui.response()
-                },
-            );
-            let header_interact = ui.interact(
-                header.response.rect,
-                Id::new(format!("task_category_{category}")),
-                Sense::click(),
-            );
-            if header_interact.clicked()
-                && !state
-                    .tasks
-                    .task_list
-                    .collapsed_themes
-                    .insert((*category).to_string())
-            {
-                state.tasks.task_list.collapsed_themes.remove(*category);
-            }
-
-            if !collapsed {
-                ui.add_space(2.0);
-                for controller in controllers {
-                    let response = Frame::default()
-                        .fill(egui::Color32::from_rgb(248, 250, 252))
-                        .stroke(Stroke::NONE)
-                        .inner_margin(Margin::symmetric(10, 7))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new(controller.short_title));
-                        })
-                        .response
-                        .interact(Sense::click())
-                        .on_hover_text(controller.description);
-                    if response.hovered() {
-                        ui.painter().rect_filled(
-                            response.rect,
-                            6.0,
-                            egui::Color32::from_rgba_unmultiplied(66, 113, 181, 18),
-                        );
-                        ui.painter().rect_stroke(
-                            response.rect,
-                            6.0,
-                            Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgba_unmultiplied(66, 113, 181, 72),
-                            ),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    if response.clicked() {
-                        actions.push(AppAction::CreateTask(controller.id));
-                    }
-                    ui.add_space(4.0);
+    let pal = crate::frontend::theme::palette(ui);
+    ScrollArea::vertical()
+        // Scroll only via wheel/trackpad; the scroll bar stays a non-interactive
+        // position indicator (Mac-native behaviour). This stops the bar from
+        // catching a drag that starts on the adjacent panel resize divider — the
+        // bug where dragging the divider scrolled instead of resizing.
+        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL)
+        .show(ui, |ui| {
+            for category in TASK_CATEGORIES {
+                let controllers = task_controllers()
+                    .iter()
+                    .copied()
+                    .filter(|controller| task_category(controller.theme) == *category)
+                    .filter(|controller| {
+                        search.is_empty()
+                            || controller.title.to_lowercase().contains(&search)
+                            || controller.short_title.to_lowercase().contains(&search)
+                            || controller.theme.to_lowercase().contains(&search)
+                            || controller.method.to_lowercase().contains(&search)
+                            || controller.application.to_lowercase().contains(&search)
+                    })
+                    .collect::<Vec<_>>();
+                if controllers.is_empty() {
+                    continue;
                 }
+
+                // A search keeps every matching group expanded so results stay visible.
+                let collapsed =
+                    search.is_empty() && state.tasks.task_list.collapsed_themes.contains(*category);
+                let marker = if collapsed {
+                    egui_phosphor::regular::CARET_RIGHT
+                } else {
+                    egui_phosphor::regular::CARET_DOWN
+                };
+
+                let header = ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 0.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.label(RichText::new(marker).size(11.0).color(pal.text_muted));
+                        ui.label(RichText::new(*category).strong());
+                        ui.response()
+                    },
+                );
+                let header_interact = ui.interact(
+                    header.response.rect,
+                    Id::new(format!("task_category_{category}")),
+                    Sense::click(),
+                );
+                if header_interact.clicked()
+                    && !state
+                        .tasks
+                        .task_list
+                        .collapsed_themes
+                        .insert((*category).to_string())
+                {
+                    state.tasks.task_list.collapsed_themes.remove(*category);
+                }
+
+                if !collapsed {
+                    ui.add_space(2.0);
+                    for controller in controllers {
+                        let response = Frame::default()
+                            .fill(pal.item_fill)
+                            .stroke(Stroke::NONE)
+                            .inner_margin(Margin::symmetric(10, 7))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new(controller.short_title));
+                            })
+                            .response
+                            .interact(Sense::click())
+                            .on_hover_text(controller.description);
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(response.rect, 6.0, pal.blue_overlay(18));
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                6.0,
+                                Stroke::new(1.0, pal.blue_overlay(72)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if response.clicked() {
+                            actions.push(AppAction::CreateTask(controller.id));
+                        }
+                        ui.add_space(4.0);
+                    }
+                }
+                ui.add_space(8.0);
             }
-            ui.add_space(8.0);
-        }
-    });
+        });
 }
 
 /// Owned snapshot of one engine capability, decoupled from the registry
@@ -1618,10 +1753,11 @@ fn render_engine_settings(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
         Some(checked_at) => format!("Versions last checked {}", humanize_since(checked_at)),
         None => "Versions not checked yet — click Re-detect".to_string(),
     };
+    let pal = crate::frontend::theme::palette(ui);
     ui.label(
         RichText::new(versions_caption)
             .small()
-            .color(egui::Color32::GRAY),
+            .color(pal.text_tertiary),
     );
 
     let rows: Vec<EngineRowView> = registry
@@ -1645,14 +1781,14 @@ fn render_engine_settings(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
                 egui_phosphor::regular::CHECK_CIRCLE,
                 row.name
             ))
-            .color(egui::Color32::from_rgb(40, 140, 70))
+            .color(pal.status_green)
         } else {
             RichText::new(format!(
                 "{}  {}",
                 egui_phosphor::regular::X_CIRCLE,
                 row.name
             ))
-            .color(egui::Color32::from_rgb(170, 70, 70))
+            .color(pal.status_red)
         };
         ui.label(badge.strong());
         if let Some(version) = &row.version {
@@ -1661,7 +1797,7 @@ fn render_engine_settings(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
         ui.label(
             RichText::new(row.description)
                 .small()
-                .color(egui::Color32::GRAY),
+                .color(pal.text_tertiary),
         );
 
         if row.built_in {
@@ -1696,14 +1832,20 @@ fn render_engine_settings(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
         ui.label(
             RichText::new("e.g. `wsl.exe -e` to run inside WSL; leave blank for a native install")
                 .small()
-                .color(egui::Color32::GRAY),
+                .color(pal.text_tertiary),
         );
         ui.horizontal(|ui| {
             ui.label("Program:");
-            ui.text_edit_singleline(&mut draft.program);
-            if ui.button("Browse").clicked() {
-                actions.push(AppAction::BrowseEngineProgram(row.id));
-            }
+            // Reserve the Browse button on the right and let the text field fill
+            // the space between it and the label. A plain left-to-right layout
+            // gives the singleline edit an infinite desired width, which eats the
+            // whole row and pushes Browse off the (clipped) right edge.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Browse").clicked() {
+                    actions.push(AppAction::BrowseEngineProgram(row.id));
+                }
+                ui.add(egui::TextEdit::singleline(&mut draft.program).desired_width(f32::INFINITY));
+            });
         });
         ui.horizontal(|ui| {
             if ui.button("Apply & Detect").clicked() {
@@ -1747,10 +1889,34 @@ fn viewport_visual_settings_view(
     ui.separator();
 
     let search = state.ui.settings.search_query.to_lowercase();
+    let pal = crate::frontend::theme::palette(ui);
 
     ScrollArea::vertical()
         .auto_shrink([false, false])
+        // No drag-to-scroll: a horizontal drag near the resize divider must
+        // resize the sidebar, not pan the settings list.
+        // Scroll only via wheel/trackpad; the scroll bar stays a non-interactive
+        // position indicator (Mac-native behaviour). This stops the bar from
+        // catching a drag that starts on the adjacent panel resize divider — the
+        // bug where dragging the divider scrolled instead of resizing.
+        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL)
         .show(ui, |ui| {
+            settings_section(ui, "Appearance", &search, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Theme");
+                    let current = state.config.theme;
+                    egui::ComboBox::from_id_salt("theme_mode")
+                        .selected_text(current.label())
+                        .show_ui(ui, |ui| {
+                            for mode in crate::backend::config::ThemeMode::all() {
+                                if ui.selectable_label(current == mode, mode.label()).clicked() {
+                                    actions.push(AppAction::SetThemeMode(mode));
+                                }
+                            }
+                        });
+                });
+            });
+
             settings_section(ui, "Engines", &search, |ui| {
                 render_engine_settings(state, ui, actions);
             });
@@ -1790,14 +1956,14 @@ fn viewport_visual_settings_view(
                         "Tip: use Selection ▸ Select by type to pick all protein / solvent / … atoms, then apply a style.",
                     )
                     .small()
-                    .color(egui::Color32::GRAY),
+                    .color(pal.text_tertiary),
                 );
 
                 ui.separator();
                 ui.label(
                     RichText::new("Project default style by category")
                         .small()
-                        .color(egui::Color32::GRAY),
+                        .color(pal.text_tertiary),
                 );
                 egui::Grid::new("project_category_styles")
                     .num_columns(2)
@@ -2117,6 +2283,7 @@ fn window_control_button(
     hover_fill: egui::Color32,
 ) -> egui::Response {
     let is_close = icon == egui_phosphor::regular::X;
+    let pal = crate::frontend::theme::palette(ui);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 24.0), Sense::click());
     let fill = if response.hovered() {
         hover_fill
@@ -2126,7 +2293,7 @@ fn window_control_button(
     let text_color = if is_close && response.hovered() {
         egui::Color32::WHITE
     } else {
-        egui::Color32::from_rgb(70, 78, 88)
+        pal.text_muted
     };
 
     ui.painter()
@@ -2154,12 +2321,13 @@ fn with_core_button_style<R>(
 }
 
 fn configure_core_button_visuals(ui: &mut Ui, selected: bool) {
-    let inactive_fill = core_button_fill(selected, false);
-    let hovered_fill = core_button_fill(selected, true);
-    let selected_fill = core_button_fill(true, false);
-    let selected_hover_fill = core_button_fill(true, true);
-    let inactive_text = core_button_text_color(selected);
-    let selected_text = core_button_text_color(true);
+    let pal = crate::frontend::theme::palette(ui);
+    let inactive_fill = core_button_fill(&pal, selected, false);
+    let hovered_fill = core_button_fill(&pal, selected, true);
+    let selected_fill = core_button_fill(&pal, true, false);
+    let selected_hover_fill = core_button_fill(&pal, true, true);
+    let inactive_text = core_button_text_color(&pal, selected);
+    let selected_text = core_button_text_color(&pal, true);
     let visuals = &mut ui.style_mut().visuals.widgets;
 
     visuals.inactive.weak_bg_fill = inactive_fill;
@@ -2183,23 +2351,23 @@ fn configure_core_button_visuals(ui: &mut Ui, selected: bool) {
     visuals.open.fg_stroke.color = selected_text;
 }
 
-fn core_button_fill(selected: bool, hovered: bool) -> egui::Color32 {
+fn core_button_fill(
+    pal: &crate::frontend::theme::Palette,
+    selected: bool,
+    hovered: bool,
+) -> egui::Color32 {
     match (selected, hovered) {
         (false, false) => egui::Color32::TRANSPARENT,
-        (false, true) => egui::Color32::from_rgba_unmultiplied(70, 78, 88, CORE_BUTTON_HOVER_ALPHA),
-        (true, false) => {
-            egui::Color32::from_rgba_unmultiplied(70, 78, 88, CORE_BUTTON_SELECTED_ALPHA)
-        }
-        (true, true) => {
-            egui::Color32::from_rgba_unmultiplied(70, 78, 88, CORE_BUTTON_SELECTED_HOVER_ALPHA)
-        }
+        (false, true) => pal.neutral_overlay(CORE_BUTTON_HOVER_ALPHA),
+        (true, false) => pal.neutral_overlay(CORE_BUTTON_SELECTED_ALPHA),
+        (true, true) => pal.neutral_overlay(CORE_BUTTON_SELECTED_HOVER_ALPHA),
     }
 }
 
-fn core_button_text_color(selected: bool) -> egui::Color32 {
+fn core_button_text_color(pal: &crate::frontend::theme::Palette, selected: bool) -> egui::Color32 {
     if selected {
-        egui::Color32::from_rgb(32, 37, 43)
+        pal.text_primary
     } else {
-        egui::Color32::from_rgb(70, 78, 88)
+        pal.text_muted
     }
 }

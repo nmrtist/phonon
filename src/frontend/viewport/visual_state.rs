@@ -154,10 +154,23 @@ pub struct ViewportVisualState {
     pub hetero_atom_colors: bool,
 }
 
+impl ViewportVisualState {
+    /// Factory background. Also the sentinel for "no explicit choice — follow
+    /// the app theme"; the viewport swaps in the theme's background when the
+    /// stored color still equals this.
+    pub const DEFAULT_BACKGROUND: Color32 = Color32::from_rgb(245, 247, 249);
+
+    /// Whether the background should track the active light/dark theme, i.e. the
+    /// user hasn't picked a custom color in settings.
+    pub fn background_follows_theme(&self) -> bool {
+        self.background_color == Self::DEFAULT_BACKGROUND
+    }
+}
+
 impl Default for ViewportVisualState {
     fn default() -> Self {
         Self {
-            background_color: Color32::from_rgb(245, 247, 249),
+            background_color: Self::DEFAULT_BACKGROUND,
             category_styles: BTreeMap::new(),
             atom_styles: BTreeMap::new(),
             show_atom_labels: false,
