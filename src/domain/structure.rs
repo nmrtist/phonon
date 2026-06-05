@@ -434,6 +434,21 @@ impl UnitCell {
         }
     }
 
+    /// Whether this is the `1 × 1 × 1` / 90°-90°-90° placeholder cell that some
+    /// modeling tools write into a `CRYST1` record for a non-periodic molecule.
+    /// It is not a real lattice: using it for periodic distance or bond
+    /// inference collapses every atom onto a neighbor's image and connects
+    /// everything, so callers must treat it as "no cell".
+    pub fn is_placeholder(&self) -> bool {
+        const TOLERANCE: f32 = 0.001;
+        (self.a - 1.0).abs() < TOLERANCE
+            && (self.b - 1.0).abs() < TOLERANCE
+            && (self.c - 1.0).abs() < TOLERANCE
+            && (self.alpha - 90.0).abs() < TOLERANCE
+            && (self.beta - 90.0).abs() < TOLERANCE
+            && (self.gamma - 90.0).abs() < TOLERANCE
+    }
+
     pub fn from_parameters(a: f32, b: f32, c: f32, alpha: f32, beta: f32, gamma: f32) -> Self {
         let alpha_rad = alpha.to_radians();
         let beta_rad = beta.to_radians();
