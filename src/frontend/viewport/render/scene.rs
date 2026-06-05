@@ -188,18 +188,26 @@ fn projected_bond_segments(
 /// applies at each end. Camera-independent — used to build GPU cylinder
 /// instances that survive rotation without a rebuild. Periodic bonds that cross
 /// a cell boundary become two half-segments, each reaching from its atom to the
-/// midpoint of the wrapped bond (mirroring [`projected_bond_segments`]).
+/// midpoint of the wrapped bond (mirroring [`projected_bond_segments`]); those
+/// halves are flagged `full_bond = false` and drawn as a single cylinder
+/// regardless of order. `aromatic_center` is the ring centroid for aromatic
+/// bonds, used to offset multi-bond cylinders into the ring plane (so the offset
+/// is view-independent).
 #[derive(Clone, Copy)]
 pub(crate) struct BondWorldSegment {
     pub(crate) start: Point3<f32>,
     pub(crate) end: Point3<f32>,
     pub(crate) start_atom: usize,
     pub(crate) end_atom: usize,
+    pub(crate) bond_type: BondType,
+    pub(crate) aromatic_center: Option<Point3<f32>>,
+    pub(crate) full_bond: bool,
 }
 
 pub(crate) fn bond_world_segments(structure: &Structure) -> Vec<BondWorldSegment> {
+    let aromatic_centers = aromatic_system_centers(structure);
     let mut segments = Vec::with_capacity(structure.bonds.len());
-    for bond in &structure.bonds {
+    for (bond_index, bond) in structure.bonds.iter().enumerate() {
         let start = structure.atoms[bond.a].position;
         let end = structure.atoms[bond.b].position;
         if let Some(cell) = &structure.cell {
@@ -210,12 +218,18 @@ pub(crate) fn bond_world_segments(structure: &Structure) -> Vec<BondWorldSegment
                     end: Point3::from(start.coords + delta * 0.5),
                     start_atom: bond.a,
                     end_atom: bond.b,
+                    bond_type: bond.bond_type,
+                    aromatic_center: None,
+                    full_bond: false,
                 });
                 segments.push(BondWorldSegment {
                     start: end,
                     end: Point3::from(end.coords - delta * 0.5),
                     start_atom: bond.b,
                     end_atom: bond.a,
+                    bond_type: bond.bond_type,
+                    aromatic_center: None,
+                    full_bond: false,
                 });
                 continue;
             }
@@ -225,6 +239,9 @@ pub(crate) fn bond_world_segments(structure: &Structure) -> Vec<BondWorldSegment
             end,
             start_atom: bond.a,
             end_atom: bond.b,
+            bond_type: bond.bond_type,
+            aromatic_center: aromatic_centers[bond_index],
+            full_bond: true,
         });
     }
     segments

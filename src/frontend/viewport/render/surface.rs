@@ -9,6 +9,7 @@ use crate::{
 };
 
 use super::super::camera::{Projector, camera_forward_world};
+use super::super::gpu::MeshVertex;
 use super::backend::{LineSegmentPrimitive, RenderScene};
 use super::cartoon::{ScreenDepthBuffer, mesh_sample_visible};
 use super::{
@@ -72,6 +73,43 @@ pub(crate) fn build_cached_surface_scene(
 
     let surface_geometry = cached_surface_geometry(cache, structure, surface_cache_key);
     build_surface_scene_from_geometry(surface_geometry, viewport, visual_state, cartoon_depth)
+}
+
+/// World-space surface mesh (position, normal, translucent color) for the GPU
+/// transparent mesh pipeline. The expensive contoured geometry is cached
+/// (selection-independent); only the cheap per-chain coloring runs each build.
+pub(crate) fn build_surface_world_mesh(
+    structure: &Structure,
+    surface_cache_key: &SurfaceCacheKey,
+    visual_state: &ViewportVisualState,
+    cache: &mut SurfaceCache,
+) -> Vec<MeshVertex> {
+    if visual_state.surface.chains.is_empty() {
+        return Vec::new();
+    }
+    let geometry = cached_surface_geometry(cache, structure, surface_cache_key);
+    let alpha = (1.0 - visual_state.surface.transparency).clamp(0.08, 1.0);
+    let mut mesh = Vec::new();
+    for chain_surface in &geometry.chains {
+        let base_color = visual_state
+            .chain_colors
+            .get(&chain_surface.chain_id)
+            .copied()
+            .unwrap_or(Color32::from_rgb(120, 150, 210));
+        let mut color = base_color.to_normalized_gamma_f32();
+        color[3] = alpha;
+        for triangle in &chain_surface.triangles {
+            for &index in &triangle.indices {
+                let vertex = chain_surface.vertices[index as usize];
+                mesh.push(MeshVertex {
+                    position: [vertex.position.x, vertex.position.y, vertex.position.z],
+                    normal: [vertex.normal.x, vertex.normal.y, vertex.normal.z],
+                    color,
+                });
+            }
+        }
+    }
+    mesh
 }
 
 pub(crate) fn build_surface_scene(

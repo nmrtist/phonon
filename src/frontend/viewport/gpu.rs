@@ -52,12 +52,28 @@ pub(super) struct CylinderInstance {
     pub(super) color_b: [f32; 4],
 }
 
+/// A world-space triangle-mesh vertex (cartoon ribbons, molecular surface),
+/// drawn through the general mesh pipeline. Triangles are stored as a flat soup
+/// (every three vertices form a triangle); the surface mesh carries a sub-1.0
+/// alpha for transparency.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(super) struct MeshVertex {
+    pub(super) position: [f32; 3],
+    pub(super) normal: [f32; 3],
+    pub(super) color: [f32; 4],
+}
+
 /// Camera-independent per-frame geometry. Rebuilt only when the structure,
-/// styling, or selection changes — never on camera movement.
+/// styling, or selection changes — never on camera movement. Holds the
+/// instanced primitives (atoms as spheres, bonds as cylinders) and the meshed
+/// representations (cartoon ribbons, opaque; molecular surface, transparent).
 #[derive(Default)]
 pub(super) struct MoleculeInstances {
     pub(super) spheres: Vec<SphereInstance>,
     pub(super) cylinders: Vec<CylinderInstance>,
+    pub(super) cartoon: Vec<MeshVertex>,
+    pub(super) surface: Vec<MeshVertex>,
 }
 
 #[repr(C)]
@@ -134,6 +150,8 @@ fn unit_cylinder_vertices() -> Vec<CylinderVertex> {
 pub(crate) struct MoleculeRenderer {
     sphere_pipeline: wgpu::RenderPipeline,
     cylinder_pipeline: wgpu::RenderPipeline,
+    mesh_opaque_pipeline: wgpu::RenderPipeline,
+    mesh_transparent_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     cylinder_vertices: wgpu::Buffer,
@@ -144,6 +162,12 @@ pub(crate) struct MoleculeRenderer {
     cylinders: wgpu::Buffer,
     cylinder_capacity: u32,
     cylinder_count: u32,
+    cartoon: wgpu::Buffer,
+    cartoon_capacity: u32,
+    cartoon_count: u32,
+    surface: wgpu::Buffer,
+    surface_capacity: u32,
+    surface_count: u32,
     srgb_framebuffer: bool,
 }
 
@@ -274,6 +298,81 @@ impl MoleculeRenderer {
             cache: None,
         });
 
+        const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+        let mesh_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<MeshVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &MESH_ATTRS,
+        };
+
+        // Cartoon ribbons: opaque, depth-writing.
+        let mesh_opaque_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("molecule_mesh_opaque_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("mesh_vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: std::slice::from_ref(&mesh_layout),
+            },
+            primitive,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("mesh_fs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Molecular surface: translucent, depth-tested but not depth-writing.
+        let mesh_transparent_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("molecule_mesh_transparent_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("mesh_vs"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[mesh_layout],
+                },
+                primitive,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("mesh_fs"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
         let unit_cylinder = unit_cylinder_vertices();
         let cylinder_vertices = create_static_buffer(
             device,
@@ -282,12 +381,16 @@ impl MoleculeRenderer {
             bytemuck::cast_slice(&unit_cylinder),
         );
 
-        let spheres = create_instance_buffer::<SphereInstance>(device, "molecule_spheres", 1);
-        let cylinders = create_instance_buffer::<CylinderInstance>(device, "molecule_cylinders", 1);
+        let spheres = create_dynamic_buffer::<SphereInstance>(device, "molecule_spheres", 1);
+        let cylinders = create_dynamic_buffer::<CylinderInstance>(device, "molecule_cylinders", 1);
+        let cartoon = create_dynamic_buffer::<MeshVertex>(device, "molecule_cartoon", 1);
+        let surface = create_dynamic_buffer::<MeshVertex>(device, "molecule_surface", 1);
 
         Self {
             sphere_pipeline,
             cylinder_pipeline,
+            mesh_opaque_pipeline,
+            mesh_transparent_pipeline,
             camera_buffer,
             camera_bind_group,
             cylinder_vertices,
@@ -298,6 +401,12 @@ impl MoleculeRenderer {
             cylinders,
             cylinder_capacity: 1,
             cylinder_count: 0,
+            cartoon,
+            cartoon_capacity: 1,
+            cartoon_count: 0,
+            surface,
+            surface_capacity: 1,
+            surface_count: 0,
             srgb_framebuffer: target_format.is_srgb(),
         }
     }
@@ -315,9 +424,11 @@ impl MoleculeRenderer {
     ) {
         self.sphere_count = instances.spheres.len() as u32;
         self.cylinder_count = instances.cylinders.len() as u32;
+        self.cartoon_count = instances.cartoon.len() as u32;
+        self.surface_count = instances.surface.len() as u32;
         if self.sphere_count > self.sphere_capacity {
             self.sphere_capacity = self.sphere_count.next_power_of_two();
-            self.spheres = create_instance_buffer::<SphereInstance>(
+            self.spheres = create_dynamic_buffer::<SphereInstance>(
                 device,
                 "molecule_spheres",
                 self.sphere_capacity,
@@ -325,10 +436,26 @@ impl MoleculeRenderer {
         }
         if self.cylinder_count > self.cylinder_capacity {
             self.cylinder_capacity = self.cylinder_count.next_power_of_two();
-            self.cylinders = create_instance_buffer::<CylinderInstance>(
+            self.cylinders = create_dynamic_buffer::<CylinderInstance>(
                 device,
                 "molecule_cylinders",
                 self.cylinder_capacity,
+            );
+        }
+        if self.cartoon_count > self.cartoon_capacity {
+            self.cartoon_capacity = self.cartoon_count.next_power_of_two();
+            self.cartoon = create_dynamic_buffer::<MeshVertex>(
+                device,
+                "molecule_cartoon",
+                self.cartoon_capacity,
+            );
+        }
+        if self.surface_count > self.surface_capacity {
+            self.surface_capacity = self.surface_count.next_power_of_two();
+            self.surface = create_dynamic_buffer::<MeshVertex>(
+                device,
+                "molecule_surface",
+                self.surface_capacity,
             );
         }
         if !instances.spheres.is_empty() {
@@ -341,10 +468,17 @@ impl MoleculeRenderer {
                 bytemuck::cast_slice(&instances.cylinders),
             );
         }
+        if !instances.cartoon.is_empty() {
+            queue.write_buffer(&self.cartoon, 0, bytemuck::cast_slice(&instances.cartoon));
+        }
+        if !instances.surface.is_empty() {
+            queue.write_buffer(&self.surface, 0, bytemuck::cast_slice(&instances.surface));
+        }
     }
 
     fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>) {
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        // Opaque first (depth-writing): bonds, atoms, cartoon ribbons.
         if self.cylinder_count > 0 {
             render_pass.set_pipeline(&self.cylinder_pipeline);
             render_pass.set_vertex_buffer(0, self.cylinder_vertices.slice(..));
@@ -355,6 +489,17 @@ impl MoleculeRenderer {
             render_pass.set_pipeline(&self.sphere_pipeline);
             render_pass.set_vertex_buffer(0, self.spheres.slice(..));
             render_pass.draw(0..6, 0..self.sphere_count);
+        }
+        if self.cartoon_count > 0 {
+            render_pass.set_pipeline(&self.mesh_opaque_pipeline);
+            render_pass.set_vertex_buffer(0, self.cartoon.slice(..));
+            render_pass.draw(0..self.cartoon_count, 0..1);
+        }
+        // Translucent last (depth-tested, no depth write): molecular surface.
+        if self.surface_count > 0 {
+            render_pass.set_pipeline(&self.mesh_transparent_pipeline);
+            render_pass.set_vertex_buffer(0, self.surface.slice(..));
+            render_pass.draw(0..self.surface_count, 0..1);
         }
     }
 }
@@ -379,7 +524,7 @@ fn create_static_buffer(
     buffer
 }
 
-fn create_instance_buffer<T>(device: &wgpu::Device, label: &str, capacity: u32) -> wgpu::Buffer {
+fn create_dynamic_buffer<T>(device: &wgpu::Device, label: &str, capacity: u32) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (capacity as usize * std::mem::size_of::<T>()) as u64,
@@ -454,8 +599,13 @@ pub(super) fn emit(
 #[cfg(test)]
 mod tests {
     use super::super::camera::view_center_and_radius;
-    use super::super::render::build_molecule_instances;
+    use super::super::render::{build_molecule_instances, build_surface_world_mesh};
+    use super::super::{SurfaceCache, SurfaceCacheKey};
     use super::*;
+    use crate::domain::biopolymer::{
+        PdbAtomAnnotation, ResidueId, SecondaryStructureKind, SecondaryStructureSpan,
+        build_biopolymer,
+    };
     use crate::domain::{Atom, Bond, BondType, Structure};
     use crate::frontend::{AtomSelection, ViewportVisualState};
     use eframe::egui::{Pos2, Rect, Vec2};
@@ -552,7 +702,7 @@ mod tests {
             .collect();
         let mut bonds = Vec::new();
         for ring in 0..6 {
-            bonds.push(Bond::with_type(ring, (ring + 1) % 6, BondType::Single));
+            bonds.push(Bond::with_type(ring, (ring + 1) % 6, BondType::Aromatic));
             bonds.push(Bond::with_type(ring, ring + 6, BondType::Single));
         }
         Structure::with_bonds("benzene", atoms, bonds)
@@ -695,7 +845,13 @@ mod tests {
             &ViewportVisualState::default(),
         );
         assert_eq!(instances.spheres.len(), 12);
-        assert_eq!(instances.cylinders.len(), 12);
+        // 6 aromatic ring bonds (each a main cylinder + inner dashes) plus 6
+        // single C-H bonds, so well more than one cylinder per bond.
+        assert!(
+            instances.cylinders.len() > 12,
+            "aromatic bonds should add inner dashes, got {}",
+            instances.cylinders.len()
+        );
 
         let (width, height) = (900u32, 700u32);
         let (center, radius) = view_center_and_radius(&structure, false);
@@ -728,6 +884,166 @@ mod tests {
         assert!(drawn > 1000, "expected molecule pixels, got {drawn}");
 
         let path = std::path::Path::new("target").join("gpu_smoke_benzene.png");
+        image::RgbaImage::from_raw(width, height, pixels)
+            .expect("image buffer")
+            .save(&path)
+            .expect("save png");
+        eprintln!("wrote {}", path.display());
+    }
+
+    /// A synthetic single-chain protein: an idealized α-helix followed by an
+    /// extended β-strand, so the cartoon renders a helix ribbon, a coil turn, and
+    /// a sheet arrow.
+    fn helix_sheet_protein() -> Structure {
+        let mut atoms = Vec::new();
+        let mut annotations = Vec::new();
+        let mut push_residue = |atoms: &mut Vec<Atom>, position: Point3<f32>, seq: i32| {
+            atoms.push(Atom {
+                element: "C".to_string(),
+                position,
+                charge: 0.0,
+            });
+            annotations.push(PdbAtomAnnotation {
+                atom_name: "CA".to_string(),
+                residue_name: "ALA".to_string(),
+                chain_id: 'A',
+                residue_seq: seq,
+                insertion_code: ' ',
+            });
+        };
+
+        // Helix: 11 residues on an idealized α-helix (100°/residue, 1.5 Å rise).
+        for i in 0..11usize {
+            let angle = i as f32 * 1.745;
+            push_residue(
+                &mut atoms,
+                Point3::new(2.3 * angle.cos(), 2.3 * angle.sin(), 1.5 * i as f32),
+                i as i32 + 1,
+            );
+        }
+        // Sheet: 9 residues extended along +x with a slight pleat, starting from
+        // the helix end so the chain is continuous.
+        let base = atoms.last().unwrap().position;
+        for i in 0..9usize {
+            let step = i as f32 + 1.0;
+            push_residue(
+                &mut atoms,
+                Point3::new(
+                    base.x + 3.3 * step,
+                    base.y + if i % 2 == 0 { 0.5 } else { -0.5 },
+                    base.z,
+                ),
+                12 + i as i32,
+            );
+        }
+
+        let spans = vec![
+            SecondaryStructureSpan {
+                kind: SecondaryStructureKind::Helix,
+                start: ResidueId::new('A', 1, ' '),
+                end: ResidueId::new('A', 11, ' '),
+            },
+            SecondaryStructureSpan {
+                kind: SecondaryStructureKind::Sheet,
+                start: ResidueId::new('A', 12, ' '),
+                end: ResidueId::new('A', 20, ' '),
+            },
+        ];
+        let biopolymer = build_biopolymer(&annotations, spans).expect("biopolymer");
+        Structure {
+            title: "helix_sheet".to_string(),
+            atoms,
+            bonds: Vec::new(),
+            cell: None,
+            biopolymer: Some(biopolymer),
+        }
+    }
+
+    /// GPU smoke test: render a helix+sheet cartoon and save a PNG so the ribbon
+    /// cross-sections (flat helix, sheet arrow, coil tube) can be inspected.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn gpu_renders_cartoon_to_png() {
+        let structure = helix_sheet_protein();
+        let instances = build_molecule_instances(
+            &structure,
+            &AtomSelection::default(),
+            &ViewportVisualState::default(),
+        );
+        assert!(
+            instances.cartoon.len() > 1000,
+            "expected a cartoon mesh, got {} vertices",
+            instances.cartoon.len()
+        );
+
+        let (width, height) = (1000u32, 720u32);
+        let (center, radius) = view_center_and_radius(&structure, false);
+        let projector = Projector::new(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(width as f32, height as f32)),
+            center,
+            width.min(height) as f32 * 0.6 / radius,
+            radius * 3.2,
+            0.7,
+            0.5,
+            Vec2::ZERO,
+        );
+        let background = ViewportVisualState::default()
+            .background_color
+            .to_normalized_gamma_f32();
+        let pixels = render_offscreen(&instances, &projector, width, height, background);
+
+        let path = std::path::Path::new("target").join("gpu_smoke_cartoon.png");
+        image::RgbaImage::from_raw(width, height, pixels)
+            .expect("image buffer")
+            .save(&path)
+            .expect("save png");
+        eprintln!("wrote {}", path.display());
+    }
+
+    /// GPU smoke test: render a cartoon under a translucent molecular surface,
+    /// exercising the transparent mesh pipeline and alpha blending.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn gpu_renders_surface_to_png() {
+        let structure = helix_sheet_protein();
+        let mut visual_state = ViewportVisualState::default();
+        visual_state.surface.chains.insert('A');
+        visual_state.surface.transparency = 0.45;
+
+        let mut instances =
+            build_molecule_instances(&structure, &AtomSelection::default(), &visual_state);
+        let surface_key = SurfaceCacheKey {
+            structure_id: 1,
+            structure_revision: 1,
+            style: visual_state.surface.style,
+            surface_chains: visual_state.surface.chains.iter().copied().collect(),
+        };
+        instances.surface = build_surface_world_mesh(
+            &structure,
+            &surface_key,
+            &visual_state,
+            &mut SurfaceCache::default(),
+        );
+        assert!(
+            !instances.surface.is_empty(),
+            "expected a surface mesh for chain A"
+        );
+
+        let (width, height) = (1000u32, 720u32);
+        let (center, radius) = view_center_and_radius(&structure, false);
+        let projector = Projector::new(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(width as f32, height as f32)),
+            center,
+            width.min(height) as f32 * 0.6 / radius,
+            radius * 3.2,
+            0.7,
+            0.5,
+            Vec2::ZERO,
+        );
+        let background = visual_state.background_color.to_normalized_gamma_f32();
+        let pixels = render_offscreen(&instances, &projector, width, height, background);
+
+        let path = std::path::Path::new("target").join("gpu_smoke_surface.png");
         image::RgbaImage::from_raw(width, height, pixels)
             .expect("image buffer")
             .save(&path)
