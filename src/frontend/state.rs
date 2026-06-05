@@ -130,7 +130,7 @@ pub enum CoordinateOptimizationScope {
 
 /// Per-atom drawing style, applied to a selection of atoms. Mirrors the common
 /// representation types in ChimeraX / PyMOL / VMD.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AtomStyle {
     /// Polymer-backbone ribbon. Only standard amino-acid residues actually
     /// render as cartoon; other atoms styled this way are not drawn.
@@ -695,6 +695,9 @@ pub struct UiState {
     pub settings: SettingsState,
     pub camera: ViewCamera,
     pub viewport_cache: ViewportCache,
+    /// Set once at startup when the GPU molecule renderer initializes
+    /// successfully; gates the GPU rendering path in the viewport.
+    pub gpu_ready: bool,
     pub hovered_atom: Option<usize>,
     pub selection: AtomSelection,
     pub viewport: ViewportVisualState,
@@ -728,6 +731,7 @@ impl Default for UiState {
             settings: SettingsState::default(),
             camera: ViewCamera::default(),
             viewport_cache: ViewportCache::default(),
+            gpu_ready: false,
             hovered_atom: None,
             selection: AtomSelection::default(),
             viewport: ViewportVisualState::default(),

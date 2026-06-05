@@ -7,12 +7,14 @@ use crate::{domain::Structure, frontend::AtomSelection};
 mod camera;
 mod composer;
 mod export;
+mod gpu;
 mod interaction;
 mod render;
 mod visual_state;
 
 pub use camera::ViewCamera;
 pub(crate) use export::{ViewportPngExport, export_viewport_png};
+pub(crate) use gpu::init as init_gpu_renderer;
 pub use visual_state::{
     CartoonSectionStyle, LightPreset, SurfaceStyle, ViewportCartoonState, ViewportIonState,
     ViewportLightingState, ViewportSurfaceState, ViewportVisualState, software_default_style,
@@ -34,6 +36,7 @@ pub const HOVER_FRAME: Duration = Duration::from_millis(100);
 pub struct ViewportCache {
     geometry: GeometryCache,
     surface: SurfaceCache,
+    gpu: GpuViewCache,
 }
 
 #[derive(Default)]
@@ -48,11 +51,85 @@ pub(super) struct SurfaceCache {
     geometry: Option<SurfaceSceneGeometry>,
 }
 
+/// State for the GPU ball-and-stick path. The instance set is camera-independent
+/// (rebuilt only when `instance_key` changes), while pick targets are projected
+/// atom centers cached per camera so hover/click picking stays on the CPU.
+#[derive(Default)]
+pub(super) struct GpuViewCache {
+    instance_key: Option<GpuInstanceKey>,
+    pick_key: Option<ViewportCacheKey>,
+    pick_targets: Vec<PickTarget>,
+}
+
 impl ViewportCache {
     pub fn clear(&mut self) {
         self.geometry = GeometryCache::default();
         self.surface = SurfaceCache::default();
+        self.gpu = GpuViewCache::default();
     }
+}
+
+/// Identifies the camera-independent inputs to the GPU instance set: atom
+/// positions (via the structure revision) plus everything that affects an atom's
+/// sphere radius, color, or visibility (styling and selection). Camera changes
+/// are deliberately excluded so rotation never rebuilds instances.
+#[derive(Clone, Copy, PartialEq)]
+struct GpuInstanceKey {
+    structure_id: u64,
+    structure_revision: u64,
+    visual_hash: u64,
+    selection_hash: u64,
+}
+
+impl GpuInstanceKey {
+    fn new(
+        structure_id: u64,
+        structure_revision: u64,
+        visual_state: &ViewportVisualState,
+        selection: &AtomSelection,
+    ) -> Self {
+        Self {
+            structure_id,
+            structure_revision,
+            visual_hash: hash_visual_state(visual_state),
+            selection_hash: hash_selection(selection),
+        }
+    }
+}
+
+/// Hash only the styling that changes ball-and-stick instances (per-category and
+/// per-atom style overrides, plus ion visibility/color); surface/cartoon/lighting
+/// fields do not affect the GPU instance set.
+fn hash_visual_state(visual_state: &ViewportVisualState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (category, style) in &visual_state.category_styles {
+        category.hash(&mut hasher);
+        style.hash(&mut hasher);
+    }
+    for (index, style) in &visual_state.atom_styles {
+        index.hash(&mut hasher);
+        style.hash(&mut hasher);
+    }
+    visual_state
+        .ions
+        .show_within
+        .map(f32::to_bits)
+        .hash(&mut hasher);
+    visual_state
+        .ions
+        .color
+        .map(|color| color.to_array())
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_selection(selection: &AtomSelection) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    selection.primary().hash(&mut hasher);
+    selection.ordered_indices().hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, PartialEq)]
@@ -83,6 +160,17 @@ pub struct ViewportDrawArgs<'a> {
     pub previous_hovered_atom: Option<usize>,
     pub cache: &'a mut ViewportCache,
     pub empty_state_hint: Option<&'a str>,
+    /// Whether the GPU molecule renderer initialized successfully at startup.
+    /// When false (or for representations the GPU path doesn't cover), the CPU
+    /// rasterizer is used instead.
+    pub gpu_ready: bool,
+}
+
+/// Whether the GPU ball-and-stick path can render this scene. It covers spheres
+/// and stick bonds; cartoon and molecular-surface representations still go
+/// through the CPU compositor.
+fn gpu_path_supported(structure: &Structure, visual_state: &ViewportVisualState) -> bool {
+    !any_atoms_drawn_as_cartoon(structure, visual_state) && visual_state.surface.chains.is_empty()
 }
 
 pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportInteraction {
@@ -96,6 +184,7 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         previous_hovered_atom,
         cache,
         empty_state_hint,
+        gpu_ready,
     } = args;
     let available = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
@@ -136,18 +225,33 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         camera: *camera,
         show_cell: visual_state.show_cell,
     };
-    let geometry = cached_geometry(&mut cache.geometry, cache_key, structure, &viewport);
-    let scene_result = RepresentationComposer::for_viewport(
-        structure,
-        geometry,
-        &viewport,
-        selection,
-        visual_state,
-        SurfaceCacheContext::new(&mut cache.surface, structure_id, structure_revision),
-    )
-    .build();
-    let rendered_in_full =
-        submit_scene_to_painter_within_budget(&painter, &scene_result.scene, MAX_RENDER_TRIANGLES);
+    let pick_targets = if gpu_ready && gpu_path_supported(structure, visual_state) {
+        render_molecules_gpu(
+            &painter,
+            rect,
+            &viewport,
+            cache_key,
+            structure,
+            structure_id,
+            structure_revision,
+            selection,
+            visual_state,
+            &mut cache.gpu,
+        )
+    } else {
+        render_molecules_cpu(
+            &painter,
+            rect,
+            &viewport,
+            cache_key,
+            structure,
+            structure_id,
+            structure_revision,
+            selection,
+            visual_state,
+            cache,
+        )
+    };
 
     if visual_state.show_cell
         && let Some(cell) = &structure.cell
@@ -155,28 +259,15 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         draw_cell_labels(&painter, &viewport, cell);
     }
 
-    if !rendered_in_full {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            format!(
-                "Structure too large to render ({} atoms).\nThe view is simplified; reduce the system or hide water to see more.",
-                structure.atoms.len()
-            ),
-            FontId::proportional(16.0),
-            Color32::from_rgb(150, 60, 60),
-        );
-    }
-
     let interaction = InteractionSystem::new(
         structure,
-        &scene_result.pick_targets,
+        &pick_targets,
         previous_hovered_atom,
         visual_state,
     )
     .run(ui, &response, camera);
 
-    for atom_projection in &scene_result.pick_targets {
+    for atom_projection in &pick_targets {
         if !visual_state.show_atom_labels
             || !atom_visible(structure, visual_state, atom_projection.index)
         {
@@ -205,4 +296,91 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
     );
 
     interaction
+}
+
+/// CPU rasterizer path: build the full scene (ball-and-stick, cartoon, surface,
+/// cell) and submit it to the egui painter. Returns the projected pick targets.
+#[allow(clippy::too_many_arguments)]
+fn render_molecules_cpu(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    viewport: &Projector,
+    cache_key: ViewportCacheKey,
+    structure: &Structure,
+    structure_id: u64,
+    structure_revision: u64,
+    selection: &AtomSelection,
+    visual_state: &ViewportVisualState,
+    cache: &mut ViewportCache,
+) -> Vec<PickTarget> {
+    let geometry = cached_geometry(&mut cache.geometry, cache_key, structure, viewport);
+    let scene_result = RepresentationComposer::for_viewport(
+        structure,
+        geometry,
+        viewport,
+        selection,
+        visual_state,
+        SurfaceCacheContext::new(&mut cache.surface, structure_id, structure_revision),
+    )
+    .build();
+    let rendered_in_full =
+        submit_scene_to_painter_within_budget(painter, &scene_result.scene, MAX_RENDER_TRIANGLES);
+
+    if !rendered_in_full {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            format!(
+                "Structure too large to render ({} atoms).\nThe view is simplified; reduce the system or hide water to see more.",
+                structure.atoms.len()
+            ),
+            FontId::proportional(16.0),
+            Color32::from_rgb(150, 60, 60),
+        );
+    }
+
+    scene_result.pick_targets
+}
+
+/// GPU path: rebuild the (camera-independent) instance set only when styling or
+/// selection changed, then queue a single paint callback. The unit-cell box is
+/// still drawn through the painter. Returns projected atom centers for picking.
+#[allow(clippy::too_many_arguments)]
+fn render_molecules_gpu(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    viewport: &Projector,
+    cache_key: ViewportCacheKey,
+    structure: &Structure,
+    structure_id: u64,
+    structure_revision: u64,
+    selection: &AtomSelection,
+    visual_state: &ViewportVisualState,
+    gpu_cache: &mut GpuViewCache,
+) -> Vec<PickTarget> {
+    if visual_state.show_cell
+        && let Some(cell) = &structure.cell
+    {
+        submit_scene_to_painter_within_budget(
+            painter,
+            &build_cell_scene(viewport, cell),
+            MAX_RENDER_TRIANGLES,
+        );
+    }
+
+    let instance_key =
+        GpuInstanceKey::new(structure_id, structure_revision, visual_state, selection);
+    let upload = if gpu_cache.instance_key == Some(instance_key) {
+        None
+    } else {
+        gpu_cache.instance_key = Some(instance_key);
+        Some(build_molecule_instances(structure, selection, visual_state))
+    };
+    gpu::emit(painter, rect, viewport, upload);
+
+    if gpu_cache.pick_key.as_ref() != Some(&cache_key) {
+        gpu_cache.pick_targets = project_pick_targets(structure, viewport);
+        gpu_cache.pick_key = Some(cache_key);
+    }
+    gpu_cache.pick_targets.clone()
 }

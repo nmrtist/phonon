@@ -2504,11 +2504,13 @@ name = "phonon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "eframe",
  "egui-phosphor",
  "flate2",
  "image",
  "nalgebra",
+ "pollster",
  "rfd",
  "rusqlite",
  "sdfrust",

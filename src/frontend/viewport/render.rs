@@ -14,6 +14,7 @@ mod ball_stick;
 mod canvas;
 mod cartoon;
 mod cell;
+mod instances;
 mod scene;
 mod surface;
 
@@ -27,8 +28,10 @@ pub(super) use cartoon::{
     ScreenDepthBuffer, build_biopolymer_cartoon_depth_buffer, build_biopolymer_cartoon_scene,
 };
 pub(super) use cell::{build_cell_scene, draw_cell_labels};
+pub(super) use instances::build_molecule_instances;
 pub(super) use scene::{
     PickTarget, ViewportGeometry, build_viewport_geometry, cached_geometry, pick_atom,
+    project_pick_targets,
 };
 pub(super) use surface::{SurfaceSceneGeometry, build_cached_surface_scene, build_surface_scene};
 
