@@ -1,4 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail};
 use eframe::egui;
@@ -6,7 +9,7 @@ use eframe::egui;
 use crate::backend::config::save_config;
 use crate::{
     backend::{
-        entries::EntryStore,
+        entries::{EntryOrigin, EntryStore},
         housekeeping,
         project::{
             ProjectSession, WorkspaceSession, create_project, open_project as open_project_dir,
@@ -413,6 +416,38 @@ fn stop_trajectory(state: &mut AppState) {
     state.jobs.trajectory_load = None;
 }
 
+/// The provenance for an MD-run output entry: an [`EntryOrigin::MdRun`] carrying
+/// the run's trajectory (when it wrote one) stored relative to the project root
+/// so it survives the project being moved — absolute when the run directory
+/// lives outside the project, and `None` when the run produced no trajectory.
+///
+/// The `MdRun` origin (not the trajectory) is what drives the "MD" badge, so a
+/// run is marked even when it wrote no playable trajectory (e.g. a relax-only
+/// run); playback is offered separately, only when `trajectory` is present.
+pub(crate) fn md_run_origin(
+    trajectory: Option<PathBuf>,
+    project_root: Option<&Path>,
+) -> EntryOrigin {
+    let trajectory = trajectory.map(|path| match project_root {
+        Some(root) => path
+            .strip_prefix(root)
+            .map(Path::to_path_buf)
+            .unwrap_or(path),
+        None => path,
+    });
+    EntryOrigin::MdRun { trajectory }
+}
+
+/// Mark an entry as the output of an MD run (provenance badge + playback gating).
+fn set_md_run_origin(state: &mut AppState, entry_id: u64, trajectory: Option<PathBuf>) {
+    let project_root = state
+        .workspace
+        .project()
+        .map(|project| project.root.clone());
+    let origin = md_run_origin(trajectory, project_root.as_deref());
+    state.entries.set_entry_origin(entry_id, origin);
+}
+
 fn poll_engine_job(state: &mut AppState, ctx: &egui::Context) {
     let Some(mut running) = state.jobs.take_engine() else {
         return;
@@ -450,10 +485,19 @@ fn poll_engine_job(state: &mut AppState, ctx: &egui::Context) {
                 running.append_log(line);
             }
             EngineWorkerMessage::Finished(success) => {
+                // Mark MD-run output entries so the UI shows the "MD" badge and,
+                // when the run wrote a trajectory, offers playback. The badge
+                // tracks the job kind, not the trajectory, so a relax-only run
+                // (which writes no `.xtc`) is still marked; build jobs are not.
+                let is_md_run = success.job_kind == "run-md";
+                let trajectory = success.trajectory.clone();
                 let save_path = structure_io::default_structure_save_path(&success.structure, None);
                 let entry_id = add_and_show_entry(state, success.structure, None, save_path);
                 if let Some(task_run_id) = task_run_id {
                     record_task_result_entry(state, task_run_id, entry_id);
+                }
+                if is_md_run {
+                    set_md_run_origin(state, entry_id, trajectory);
                 }
                 state.set_message(success.summary);
                 saw_progress = false;
@@ -2520,6 +2564,43 @@ mod tests {
                 charge: 0.0,
             }],
         )
+    }
+
+    #[test]
+    fn md_run_origin_marks_run_even_without_a_trajectory() {
+        use crate::backend::entries::EntryOrigin;
+        use std::path::Path;
+
+        // A relax-only run writes no `.xtc`: still an MD-run output (so the
+        // badge shows), just without a playable trajectory.
+        let origin = super::md_run_origin(None, Some(Path::new(r"C:\proj")));
+        assert!(origin.is_md_run());
+        assert_eq!(origin.trajectory(), None);
+        assert_eq!(origin, EntryOrigin::MdRun { trajectory: None });
+    }
+
+    #[test]
+    fn md_run_origin_stores_trajectory_relative_to_project_root() {
+        use std::path::Path;
+
+        let root = Path::new(r"C:\proj");
+        let absolute = PathBuf::from(r"C:\proj\runs\run-md-1\md.xtc");
+        let origin = super::md_run_origin(Some(absolute), Some(root));
+        assert_eq!(
+            origin.trajectory(),
+            Some(Path::new(r"runs\run-md-1\md.xtc")),
+        );
+    }
+
+    #[test]
+    fn md_run_origin_keeps_trajectory_absolute_when_outside_the_project() {
+        use std::path::Path;
+
+        // Run directory outside the project root: the path can't be made
+        // relative, so it stays absolute rather than being dropped.
+        let outside = PathBuf::from(r"D:\scratch\md.xtc");
+        let origin = super::md_run_origin(Some(outside.clone()), Some(Path::new(r"C:\proj")));
+        assert_eq!(origin.trajectory(), Some(outside.as_path()));
     }
 
     #[test]

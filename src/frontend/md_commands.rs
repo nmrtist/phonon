@@ -368,11 +368,25 @@ fn md_simulate(state: &mut AppState, args: &[String]) -> Result<String> {
         let production = results
             .last()
             .ok_or_else(|| anyhow!("pipeline produced no stages"))?;
+        // The production stage writes the compressed `.xtc`; take the last stage
+        // that produced one so playback follows the actual MD trajectory.
+        let trajectory = results
+            .iter()
+            .rev()
+            .find_map(|stage| stage.trajectory.clone());
         let save_path = structure_io::default_structure_save_path(&production.structure, None);
         let entry_id = state
             .entries
             .add_entry(production.structure.clone(), None, save_path);
         activate_entry(state, entry_id);
+        // Mark the entry as an MD-run output (provenance badge + playback gating),
+        // mirroring the GUI run path.
+        let project_root = state
+            .workspace
+            .project()
+            .map(|project| project.root.clone());
+        let origin = super::dispatcher::md_run_origin(trajectory, project_root.as_deref());
+        state.entries.set_entry_origin(entry_id, origin);
         record_cli_task_result_entry(state, task_run_id, entry_id)?;
 
         let analysis_summary = run_analysis(&work_dir, &launch, production, cancel);

@@ -63,6 +63,10 @@ pub struct EngineSuccess {
     pub structure: Structure,
     pub summary: String,
     pub working_dir: PathBuf,
+    /// Trajectory file produced by the run (the production stage's `.xtc`), if
+    /// any. Used to mark the resulting entry as an MD-run output that can be
+    /// played back; `None` for build jobs.
+    pub trajectory: Option<PathBuf>,
 }
 
 pub struct GromacsPipelineRequest {
@@ -291,6 +295,7 @@ pub fn spawn_gromacs_build_job(request: BuildRequest) -> RunningEngineJob {
                     structure: outcome.structure,
                     summary: outcome.summary,
                     working_dir: outcome.working_dir,
+                    trajectory: None,
                 })));
             }
             Err(error) => {
@@ -348,6 +353,7 @@ pub fn spawn_material_build_job(request: MaterialBuildRequest) -> RunningEngineJ
                     structure: outcome.structure,
                     summary: outcome.summary,
                     working_dir: outcome.working_dir,
+                    trajectory: None,
                 })));
             }
             Err(error) => {
@@ -382,12 +388,19 @@ fn engine_success_from_gromacs_pipeline(results: Vec<StageResult>) -> EngineSucc
             final_result.wall_time
         ),
     };
+    // The production stage writes the compressed `.xtc`; take the last stage
+    // that produced one so playback follows the actual MD trajectory.
+    let trajectory = results
+        .iter()
+        .rev()
+        .find_map(|stage| stage.trajectory.clone());
     EngineSuccess {
         engine: "gromacs",
         job_kind: "run-md",
         structure: final_result.structure.clone(),
         summary,
         working_dir: final_result.working_dir.clone(),
+        trajectory,
     }
 }
 

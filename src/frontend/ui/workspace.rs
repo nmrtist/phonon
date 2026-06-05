@@ -167,6 +167,13 @@ fn render_trajectory_controls(
         .as_ref()
         .map(|load| load.entry_id)
         == Some(entry_id);
+    // An MD-run entry only offers playback when its run actually wrote a
+    // trajectory; a relax-only run is still badged but has nothing to play.
+    let has_trajectory = state
+        .entries
+        .entry(entry_id)
+        .map(|entry| entry.origin.trajectory().is_some())
+        .unwrap_or(false);
     // Snapshot the playback cursor so we don't hold a borrow while emitting
     // actions (the dispatcher mutates the same state next frame).
     let playback = state
@@ -222,7 +229,7 @@ fn render_trajectory_controls(
         } else if loading {
             ui.add(egui::Spinner::new());
             ui.label(RichText::new("Decoding trajectory…").color(pal.text_muted));
-        } else {
+        } else if has_trajectory {
             if ui
                 .button(RichText::new(format!("{}  Play trajectory", icons::PLAY)))
                 .clicked()
@@ -233,6 +240,17 @@ fn render_trajectory_controls(
                 RichText::new("from MD run output")
                     .small()
                     .color(pal.text_tertiary),
+            );
+        } else {
+            ui.label(
+                RichText::new("MD run output")
+                    .small()
+                    .color(pal.text_tertiary),
+            );
+            ui.label(
+                RichText::new("— no trajectory recorded for this run")
+                    .small()
+                    .color(pal.text_muted),
             );
         }
     });

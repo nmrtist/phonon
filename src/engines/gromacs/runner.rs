@@ -1019,6 +1019,34 @@ AR  8
             production.checkpoint.is_some(),
             "production should write a checkpoint"
         );
+
+        // Decode the GROMACS-produced trajectory end-to-end (the real-tool gate
+        // for trajectory playback): a genuine `.xtc` must parse into multiple
+        // frames over the same atom count, with finite Angstrom coordinates.
+        let trajectory_path = production
+            .trajectory
+            .as_ref()
+            .expect("production trajectory path");
+        let trajectory =
+            crate::io::trajectory::read_xtc(trajectory_path).expect("decode production .xtc");
+        assert!(
+            trajectory.frame_count() >= 1,
+            "trajectory should contain at least one frame"
+        );
+        assert_eq!(
+            trajectory.natoms(),
+            production.structure.atoms.len(),
+            "trajectory atom count should match the final structure"
+        );
+        for frame in 0..trajectory.frame_count() {
+            for atom in 0..trajectory.natoms() {
+                let position = trajectory.position(frame, atom);
+                assert!(
+                    position.coords.iter().all(|value| value.is_finite()),
+                    "frame {frame} atom {atom} has non-finite coordinates"
+                );
+            }
+        }
     }
 
     /// Like [`wsl_gromacs_full_md_pipeline_runs_end_to_end`], but the topology

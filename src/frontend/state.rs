@@ -1014,6 +1014,10 @@ impl AppState {
             record.revision.hash(&mut hasher);
             record.name.hash(&mut hasher);
             record.group_id.hash(&mut hasher);
+            // Provenance (e.g. an entry becoming an MD-run output) is persisted,
+            // so a change to it must trigger an autosave too.
+            record.origin.kind_token().hash(&mut hasher);
+            record.origin.trajectory().hash(&mut hasher);
         }
         for group in &self.entries.groups {
             group.id.hash(&mut hasher);
