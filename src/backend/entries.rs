@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::domain::Structure;
 
@@ -6,6 +6,54 @@ use crate::domain::Structure;
 pub struct EntryGroup {
     pub id: String,
     pub name: String,
+}
+
+/// Where an entry's structure came from. Drives provenance labelling in the UI
+/// (e.g. an "MD" badge) and feature availability (trajectory playback). New
+/// provenance kinds can be added as variants without disturbing existing ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum EntryOrigin {
+    /// Imported or created by the user (the default for normal entries).
+    #[default]
+    User,
+    /// Produced by a molecular-dynamics engine run. `trajectory`, when present,
+    /// is the run's trajectory file *relative to the project root*; it stays in
+    /// the task run directory (never copied into the project database) and is
+    /// read on demand for playback.
+    MdRun { trajectory: Option<PathBuf> },
+}
+
+impl EntryOrigin {
+    /// Short stable token persisted in the `entries.origin_kind` column.
+    pub fn kind_token(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::MdRun { .. } => "md",
+        }
+    }
+
+    /// Project-relative trajectory path, when this origin carries one.
+    pub fn trajectory(&self) -> Option<&Path> {
+        match self {
+            Self::MdRun { trajectory } => trajectory.as_deref(),
+            Self::User => None,
+        }
+    }
+
+    /// Whether this entry is the output of an MD run (used for the badge and to
+    /// gate trajectory playback).
+    pub fn is_md_run(&self) -> bool {
+        matches!(self, Self::MdRun { .. })
+    }
+
+    /// Rebuild an origin from its persisted `(origin_kind, origin_trajectory)`
+    /// columns.
+    pub fn from_storage(kind: Option<&str>, trajectory: Option<PathBuf>) -> Self {
+        match kind {
+            Some("md") => Self::MdRun { trajectory },
+            _ => Self::User,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +70,8 @@ pub struct EntryRecord {
     /// only entries with an open tab are materialized; the rest carry a
     /// placeholder structure with `loaded = false` until they are activated.
     pub loaded: bool,
+    /// Provenance of this entry (user import vs. MD-run output, ...).
+    pub origin: EntryOrigin,
 }
 
 impl EntryRecord {
@@ -42,6 +92,7 @@ impl EntryRecord {
             save_path,
             compound_id: None,
             loaded: true,
+            origin: EntryOrigin::User,
         }
     }
 }
@@ -62,6 +113,7 @@ pub struct EntryRecordMetadata {
     pub compound_id: Option<i64>,
     pub revision: u64,
     pub loaded: bool,
+    pub origin: EntryOrigin,
 }
 
 #[derive(Debug, Clone)]
@@ -200,8 +252,17 @@ impl EntryStore {
             save_path: metadata.save_path,
             compound_id: metadata.compound_id,
             loaded: metadata.loaded,
+            origin: metadata.origin,
         });
         id
+    }
+
+    /// Record the provenance of an existing entry (e.g. mark it as the output of
+    /// an MD run once the run's trajectory path is known).
+    pub fn set_entry_origin(&mut self, entry_id: u64, origin: EntryOrigin) {
+        if let Some(entry) = self.entry_mut(entry_id) {
+            entry.origin = origin;
+        }
     }
 
     pub fn recompute_next_ids(&mut self) {

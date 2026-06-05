@@ -13,6 +13,7 @@ mod render;
 mod visual_state;
 
 pub use camera::ViewCamera;
+pub(crate) use camera::view_center_and_radius;
 pub(crate) use export::{ViewportPngExport, export_viewport_png};
 pub(crate) use gpu::init as init_gpu_renderer;
 pub use visual_state::{
@@ -20,7 +21,7 @@ pub use visual_state::{
     ViewportLightingState, ViewportSurfaceState, ViewportVisualState, software_default_style,
 };
 
-use camera::{Projector, view_center_and_radius};
+use camera::Projector;
 use composer::{RepresentationComposer, SurfaceCacheContext};
 use interaction::{InteractionSystem, ViewportInteraction};
 use render::*;
@@ -187,6 +188,10 @@ pub struct ViewportDrawArgs<'a> {
     /// When false (or for representations the GPU path doesn't cover), the CPU
     /// rasterizer is used instead.
     pub gpu_ready: bool,
+    /// Fixed camera framing `(center, radius)` to use instead of deriving it
+    /// from `structure`. Set during trajectory playback so the view does not
+    /// drift/zoom as atoms move between frames; `None` recomputes per frame.
+    pub view_override: Option<(nalgebra::Point3<f32>, f32)>,
 }
 
 /// Whether the GPU path can render this scene. It covers spheres, stick bonds,
@@ -210,6 +215,7 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         cache,
         empty_state_hint,
         gpu_ready,
+        view_override,
     } = args;
     let available = ui.available_size();
     // The default background follows the app theme (dark in dark mode); an
@@ -240,7 +246,8 @@ pub fn draw_viewport(ui: &mut egui::Ui, args: ViewportDrawArgs<'_>) -> ViewportI
         return ViewportInteraction::default();
     }
 
-    let (center, radius) = view_center_and_radius(structure, visual_state.show_cell);
+    let (center, radius) =
+        view_override.unwrap_or_else(|| view_center_and_radius(structure, visual_state.show_cell));
     let viewport = Projector::new(
         rect,
         center,

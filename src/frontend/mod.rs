@@ -16,6 +16,7 @@ mod structure_editor;
 mod structure_import;
 mod task_executor;
 mod theme;
+mod trajectory;
 mod ui;
 mod viewport;
 mod viewport_defaults;

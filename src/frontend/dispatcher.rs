@@ -36,6 +36,8 @@ use crate::{
         state::AppState,
         structure_import::{import_document, load_document},
         task_executor::task_executor,
+        trajectory::{DEFAULT_PLAYBACK_FPS, TrajectoryPlayback, spawn_trajectory_load},
+        viewport::view_center_and_radius,
     },
     io::{pdb_fetch, structure_io},
 };
@@ -130,6 +132,10 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::BrowseEngineProgram(id) => browse_engine_program(state, id),
         AppAction::RunConsoleCommand(command) => run_console_command(state, &command),
         AppAction::SetThemeMode(mode) => set_theme_mode(state, mode, ctx),
+        AppAction::LoadTrajectory(entry_id) => load_trajectory(state, entry_id, ctx),
+        AppAction::ToggleTrajectoryPlay => toggle_trajectory_play(state, ctx),
+        AppAction::SetTrajectoryFrame(frame) => set_trajectory_frame(state, frame),
+        AppAction::StopTrajectory => stop_trajectory(state),
     }
     if let Some(before) = fingerprint_before
         && state.entries_fingerprint() != before
@@ -256,6 +262,155 @@ pub fn handle_history_shortcuts(state: &mut AppState, ctx: &egui::Context) {
 pub fn poll_jobs(state: &mut AppState, ctx: &egui::Context) {
     poll_engine_job(state, ctx);
     poll_optimization_job(state, ctx);
+    poll_trajectory_jobs(state, ctx);
+}
+
+/// Drain a finished background trajectory decode (if any) into playback state,
+/// then advance the playing frame on the wall clock.
+fn poll_trajectory_jobs(state: &mut AppState, ctx: &egui::Context) {
+    if let Some(load) = state.jobs.trajectory_load.take() {
+        match load.receiver.try_recv() {
+            Ok(Ok(trajectory)) => {
+                if trajectory.is_empty() {
+                    state.set_message("Trajectory contains no frames");
+                } else {
+                    let (view_center, view_radius) =
+                        view_center_and_radius(&load.base_structure, load.include_cell);
+                    let frames = trajectory.frame_count();
+                    let subsampled = trajectory.stride() > 1;
+                    let source_frames = trajectory.source_frame_count();
+                    let now = ctx.input(|input| input.time);
+                    let mut playback = TrajectoryPlayback {
+                        entry_id: load.entry_id,
+                        trajectory,
+                        scratch: load.base_structure,
+                        current_frame: 0,
+                        playing: true,
+                        fps: DEFAULT_PLAYBACK_FPS,
+                        last_advance_secs: now,
+                        view_center,
+                        view_radius,
+                    };
+                    playback.sync_scratch();
+                    state.ui.trajectory = Some(playback);
+                    if subsampled {
+                        state.set_message(format!(
+                            "Playing trajectory: {frames} of {source_frames} frames (subsampled)"
+                        ));
+                    } else {
+                        state.set_message(format!("Playing trajectory: {frames} frames"));
+                    }
+                    ctx.request_repaint();
+                }
+            }
+            Ok(Err(error)) => {
+                state.set_message(format!("Trajectory load failed: {error}"));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Still decoding; keep the handle and poll again next frame.
+                state.jobs.trajectory_load = Some(load);
+                ctx.request_repaint_after(engine_poll_frame());
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                state.set_message("Trajectory load failed: worker stopped");
+            }
+        }
+    }
+
+    advance_trajectory_playback(state, ctx);
+}
+
+/// While a trajectory is playing and its entry is active, step the current
+/// frame forward on the wall clock at the configured rate.
+fn advance_trajectory_playback(state: &mut AppState, ctx: &egui::Context) {
+    let active_entry = state.entries.active_entry_id();
+    let Some(playback) = state.ui.trajectory.as_mut() else {
+        return;
+    };
+    if !playback.playing || active_entry != Some(playback.entry_id) || playback.frame_count() <= 1 {
+        return;
+    }
+    let now = ctx.input(|input| input.time);
+    let interval = 1.0 / playback.fps.max(1.0) as f64;
+    if now - playback.last_advance_secs >= interval {
+        playback.advance_frame();
+        playback.last_advance_secs = now;
+    }
+    ctx.request_repaint_after(Duration::from_secs_f64(interval));
+}
+
+/// Begin (or resume) playback of an entry's MD trajectory. The trajectory file
+/// lives in the run directory and is decoded in the background; this only kicks
+/// off the load (or restarts playback if it is already loaded).
+fn load_trajectory(state: &mut AppState, entry_id: u64, ctx: &egui::Context) {
+    // Already playing this entry's trajectory: just ensure it is running.
+    if state.ui.trajectory.as_ref().map(|p| p.entry_id) == Some(entry_id) {
+        if let Some(playback) = state.ui.trajectory.as_mut() {
+            playback.playing = true;
+            playback.last_advance_secs = ctx.input(|input| input.time);
+        }
+        return;
+    }
+    // Already decoding this entry's trajectory.
+    if state.jobs.trajectory_load.as_ref().map(|l| l.entry_id) == Some(entry_id) {
+        return;
+    }
+
+    state.ensure_entry_loaded(entry_id);
+    let Some(entry) = state.entries.entry(entry_id) else {
+        return;
+    };
+    let Some(relative) = entry.origin.trajectory().map(|path| path.to_path_buf()) else {
+        state.set_message("This entry has no trajectory to play");
+        return;
+    };
+    let base_structure = entry.structure.clone();
+
+    let Some(project) = state.workspace.project() else {
+        state.set_message("Trajectory playback requires an open project");
+        return;
+    };
+    let absolute = project.root.join(&relative);
+    if !absolute.exists() {
+        state.set_message(format!(
+            "Trajectory file is missing: {}",
+            absolute.display()
+        ));
+        return;
+    }
+
+    let include_cell = state.ui.viewport.show_cell;
+    // Drop any stale playback bound to a different entry.
+    state.ui.trajectory = None;
+    state.jobs.trajectory_load = Some(spawn_trajectory_load(
+        entry_id,
+        absolute,
+        base_structure,
+        include_cell,
+    ));
+    state.set_message("Loading trajectory…");
+    ctx.request_repaint_after(engine_poll_frame());
+}
+
+fn toggle_trajectory_play(state: &mut AppState, ctx: &egui::Context) {
+    if let Some(playback) = state.ui.trajectory.as_mut() {
+        playback.playing = !playback.playing;
+        playback.last_advance_secs = ctx.input(|input| input.time);
+        ctx.request_repaint();
+    }
+}
+
+fn set_trajectory_frame(state: &mut AppState, frame: usize) {
+    if let Some(playback) = state.ui.trajectory.as_mut() {
+        playback.set_frame(frame);
+        // Scrubbing pauses playback so the chosen frame stays put.
+        playback.playing = false;
+    }
+}
+
+fn stop_trajectory(state: &mut AppState) {
+    state.ui.trajectory = None;
+    state.jobs.trajectory_load = None;
 }
 
 fn poll_engine_job(state: &mut AppState, ctx: &egui::Context) {

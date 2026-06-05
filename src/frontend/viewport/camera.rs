@@ -96,7 +96,7 @@ impl Projector {
     }
 }
 
-pub(super) fn view_center_and_radius(
+pub(crate) fn view_center_and_radius(
     structure: &Structure,
     include_cell: bool,
 ) -> (Point3<f32>, f32) {

@@ -6,3 +6,4 @@ pub mod structure_format;
 pub mod structure_io;
 pub mod structure_paths;
 pub mod structure_text;
+pub mod trajectory;

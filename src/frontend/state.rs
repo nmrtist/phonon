@@ -721,6 +721,9 @@ pub struct UiState {
     pub md_solvation_preview:
         Option<Result<crate::workflows::molecular_dynamics::SolvationEstimate, String>>,
     pub md_solvation_preview_key: u64,
+    /// Active trajectory playback (loaded from an MD-output entry's run
+    /// directory), or `None` when nothing is playing.
+    pub trajectory: Option<crate::frontend::trajectory::TrajectoryPlayback>,
 }
 
 impl Default for UiState {
@@ -751,6 +754,7 @@ impl Default for UiState {
             pending_pdb_fetch: None,
             md_solvation_preview: None,
             md_solvation_preview_key: 0,
+            trajectory: None,
         }
     }
 }

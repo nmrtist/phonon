@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{
     backend::{
         entries::EntryRecordMetadata,
-        entries::{EntryGroup, EntryStore, WorkspaceTab},
+        entries::{EntryGroup, EntryOrigin, EntryStore, WorkspaceTab},
         history::{EditSnapshot, EntryHistory, History},
         project::{PROJECT_FORMAT_VERSION, ProjectSession},
         structure_codec::{
@@ -189,7 +189,7 @@ pub fn save_project_snapshot_ref(
             )?;
         }
         project_tx.execute(
-            "insert into entries (id, name, group_id, compound_id, source_path, save_path, revision) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "insert into entries (id, name, group_id, compound_id, source_path, save_path, revision, origin_kind, origin_trajectory) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 entry.id as i64,
                 entry.name,
@@ -198,6 +198,8 @@ pub fn save_project_snapshot_ref(
                 entry.source_path.as_ref().map(path_to_string),
                 path_to_string(&entry.save_path),
                 entry.revision as i64,
+                entry.origin.kind_token(),
+                entry.origin.trajectory().map(path_to_string),
             ],
         )?;
     }
@@ -351,7 +353,9 @@ fn create_project_schema(db: &Connection) -> Result<()> {
             compound_id integer not null,
             source_path text,
             save_path text not null,
-            revision integer not null default 0
+            revision integer not null default 0,
+            origin_kind text not null default 'user',
+            origin_trajectory text
         );
         create table if not exists tabs (
             position integer primary key,
@@ -397,6 +401,7 @@ fn create_project_schema(db: &Connection) -> Result<()> {
         ",
     )?;
     ensure_task_run_columns(db)?;
+    ensure_entry_columns(db)?;
     Ok(())
 }
 
@@ -438,9 +443,11 @@ fn load_entries(project_db: &Connection, compounds_db: &Connection) -> Result<En
     store.groups = load_groups(project_db)?;
     store.records.clear();
     let mut statement = project_db.prepare(
-        "select id, name, group_id, compound_id, source_path, save_path, revision from entries order by id",
+        "select id, name, group_id, compound_id, source_path, save_path, revision, origin_kind, origin_trajectory from entries order by id",
     )?;
     let rows = statement.query_map([], |row| {
+        let origin_kind = row.get::<_, Option<String>>(7)?;
+        let origin_trajectory = row.get::<_, Option<String>>(8)?.map(PathBuf::from);
         Ok(EntryRow {
             id: row.get::<_, i64>(0)? as u64,
             name: row.get(1)?,
@@ -449,6 +456,7 @@ fn load_entries(project_db: &Connection, compounds_db: &Connection) -> Result<En
             source_path: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
             save_path: PathBuf::from(row.get::<_, String>(5)?),
             revision: row.get::<_, i64>(6)? as u64,
+            origin: EntryOrigin::from_storage(origin_kind.as_deref(), origin_trajectory),
         })
     })?;
     let entry_rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -478,6 +486,7 @@ fn load_entries(project_db: &Connection, compounds_db: &Connection) -> Result<En
             compound_id: Some(row.compound_id),
             revision: row.revision,
             loaded: load_now,
+            origin: row.origin,
         });
         store.next_entry_id = store.next_entry_id.max(entry_id + 1);
     }
@@ -1248,6 +1257,7 @@ struct EntryRow {
     source_path: Option<PathBuf>,
     save_path: PathBuf,
     revision: u64,
+    origin: EntryOrigin,
 }
 
 fn path_to_string(path: impl AsRef<std::path::Path>) -> String {
@@ -1393,6 +1403,31 @@ fn ensure_task_run_columns(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_entry_columns(db: &Connection) -> Result<()> {
+    let mut statement = db.prepare("pragma table_info(entries)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let add_column = |name: &str, ddl: &str| -> Result<()> {
+        if columns.iter().any(|column| column == name) {
+            return Ok(());
+        }
+        db.execute(ddl, [])?;
+        Ok(())
+    };
+
+    add_column(
+        "origin_kind",
+        "alter table entries add column origin_kind text not null default 'user'",
+    )?;
+    add_column(
+        "origin_trajectory",
+        "alter table entries add column origin_trajectory text",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1402,7 +1437,7 @@ mod tests {
 
     use crate::{
         backend::{
-            entries::EntryStore,
+            entries::{EntryOrigin, EntryStore},
             history::{EditSnapshot, History},
             project::ProjectSession,
             storage::{
@@ -1458,6 +1493,50 @@ mod tests {
         assert_eq!(entry.structure.atoms.len(), 2);
         assert_eq!(entry.structure.bonds[0].bond_type, BondType::Double);
         assert!(entry.structure.cell.is_some());
+        // Default provenance survives a round-trip.
+        assert_eq!(entry.origin, EntryOrigin::User);
+    }
+
+    #[test]
+    fn entry_origin_roundtrips_through_project_databases() {
+        let root = PathBuf::from("target/test-project-origin-storage");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".phonon")).unwrap();
+        let session = ProjectSession::from_root(root, "Origin".to_string());
+        initialize_project_databases(&session).unwrap();
+
+        let mut entries = EntryStore::new_empty();
+        let entry_id = entries.add_entry(
+            Structure::new("md-output", Vec::new()),
+            None,
+            PathBuf::from("md-output.xyz"),
+        );
+        let trajectory = PathBuf::from(".phonon/runs/run-md-1/prod.xtc");
+        entries.set_entry_origin(
+            entry_id,
+            EntryOrigin::MdRun {
+                trajectory: Some(trajectory.clone()),
+            },
+        );
+        let snapshot = ProjectSnapshot {
+            name: "Origin".to_string(),
+            entries,
+            tasks: TaskManager::default(),
+            view: ProjectViewSettings::default(),
+            history: History::default(),
+        };
+
+        save_project_snapshot(&session, &snapshot, true).unwrap();
+        let loaded = load_project_snapshot(&session).unwrap();
+        let entry = loaded.entries.records.first().unwrap();
+
+        assert_eq!(
+            entry.origin,
+            EntryOrigin::MdRun {
+                trajectory: Some(trajectory),
+            }
+        );
+        assert!(entry.origin.is_md_run());
     }
 
     #[test]

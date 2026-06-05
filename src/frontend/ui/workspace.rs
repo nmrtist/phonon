@@ -9,6 +9,12 @@ use crate::frontend::{
 };
 
 use super::bottom_panel::render_bottom_panel;
+
+/// Structure id used for the viewport's geometry cache while a trajectory is
+/// playing. `u64::MAX` cannot collide with a real entry id, so playback never
+/// reuses or disturbs the active entry's own cached geometry.
+const PLAYBACK_STRUCTURE_ID: u64 = u64::MAX;
+
 pub(super) fn render_workspace(
     state: &mut AppState,
     ui: &mut egui::Ui,
@@ -34,11 +40,46 @@ pub(super) fn render_workspace(
     egui::CentralPanel::default()
         .frame(Frame::default().fill(crate::frontend::theme::palette(ui).central))
         .show_inside(ui, |ui| {
+            // MD-output entries dock a trajectory playback bar at the bottom of
+            // the viewport; the viewport fills the space above it.
+            let is_md_entry = state
+                .entries
+                .active_entry()
+                .map(|entry| entry.origin.is_md_run())
+                .unwrap_or(false);
+            if is_md_entry {
+                let pal = crate::frontend::theme::palette(ui);
+                egui::Panel::bottom("trajectory_controls")
+                    .resizable(false)
+                    .frame(
+                        Frame::default()
+                            .fill(pal.bottom_panel)
+                            .inner_margin(Margin::symmetric(10, 6)),
+                    )
+                    .show_inside(ui, |ui| render_trajectory_controls(state, ui, actions));
+            }
             if let Some(entry) = state.entries.active_entry() {
-                let structure_id = entry.id;
-                let structure_revision = entry.revision;
-                let structure = &entry.structure;
+                let entry_id = entry.id;
                 let ui_state = &mut state.ui;
+                // During playback the viewport renders the trajectory's current
+                // frame (the entry's topology with swapped coordinates) under a
+                // dedicated structure id so the entry's own geometry cache is
+                // untouched, with a fixed view so the camera doesn't drift.
+                let playback = ui_state
+                    .trajectory
+                    .as_ref()
+                    .filter(|playback| playback.entry_id == entry_id);
+                let (structure, structure_id, structure_revision, view_override) =
+                    if let Some(playback) = playback {
+                        (
+                            &playback.scratch,
+                            PLAYBACK_STRUCTURE_ID,
+                            playback.current_frame as u64,
+                            Some((playback.view_center, playback.view_radius)),
+                        )
+                    } else {
+                        (&entry.structure, entry_id, entry.revision, None)
+                    };
                 let viewport_interaction = draw_viewport(
                     ui,
                     ViewportDrawArgs {
@@ -52,6 +93,7 @@ pub(super) fn render_workspace(
                         cache: &mut ui_state.viewport_cache,
                         gpu_ready: ui_state.gpu_ready,
                         empty_state_hint: None,
+                        view_override,
                     },
                 );
                 if viewport_interaction.hover_changed {
@@ -99,10 +141,101 @@ pub(super) fn render_workspace(
                         empty_state_hint: state.entries.tabs.is_empty().then_some(
                             "Open a structure from File > Open, or drag and drop one here.",
                         ),
+                        view_override: None,
                     },
                 );
             }
         });
+}
+
+/// Playback bar for an MD-output entry: a load button before the trajectory is
+/// decoded, then play/pause + a frame scrubber + a frame/time readout + close.
+fn render_trajectory_controls(
+    state: &mut AppState,
+    ui: &mut egui::Ui,
+    actions: &mut Vec<AppAction>,
+) {
+    use egui_phosphor::regular as icons;
+
+    let Some(entry_id) = state.entries.active_entry_id() else {
+        return;
+    };
+    let pal = crate::frontend::theme::palette(ui);
+    let loading = state
+        .jobs
+        .trajectory_load
+        .as_ref()
+        .map(|load| load.entry_id)
+        == Some(entry_id);
+    // Snapshot the playback cursor so we don't hold a borrow while emitting
+    // actions (the dispatcher mutates the same state next frame).
+    let playback = state
+        .ui
+        .trajectory
+        .as_ref()
+        .filter(|playback| playback.entry_id == entry_id)
+        .map(|playback| {
+            (
+                playback.playing,
+                playback.current_frame,
+                playback.frame_count(),
+                playback.trajectory.time(playback.current_frame),
+            )
+        });
+
+    ui.horizontal(|ui| {
+        if let Some((playing, current, count, time)) = playback {
+            let icon = if playing { icons::PAUSE } else { icons::PLAY };
+            if ui
+                .button(RichText::new(icon).size(16.0))
+                .on_hover_text(if playing { "Pause" } else { "Play" })
+                .clicked()
+            {
+                actions.push(AppAction::ToggleTrajectoryPlay);
+            }
+
+            let last = count.saturating_sub(1);
+            let mut frame = current;
+            let slider = ui.add(
+                egui::Slider::new(&mut frame, 0..=last)
+                    .show_value(false)
+                    .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.5 }),
+            );
+            if slider.changed() {
+                actions.push(AppAction::SetTrajectoryFrame(frame));
+            }
+
+            ui.label(
+                RichText::new(format!("{} / {count}", current + 1))
+                    .monospace()
+                    .color(pal.text_primary),
+            );
+            ui.label(RichText::new(format!("{time:.2} ps")).color(pal.text_tertiary));
+
+            if ui
+                .button(RichText::new(icons::X).size(14.0))
+                .on_hover_text("Close trajectory")
+                .clicked()
+            {
+                actions.push(AppAction::StopTrajectory);
+            }
+        } else if loading {
+            ui.add(egui::Spinner::new());
+            ui.label(RichText::new("Decoding trajectory…").color(pal.text_muted));
+        } else {
+            if ui
+                .button(RichText::new(format!("{}  Play trajectory", icons::PLAY)))
+                .clicked()
+            {
+                actions.push(AppAction::LoadTrajectory(entry_id));
+            }
+            ui.label(
+                RichText::new("from MD run output")
+                    .small()
+                    .color(pal.text_tertiary),
+            );
+        }
+    });
 }
 
 fn render_scratch_workspace(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {

@@ -100,6 +100,8 @@ impl RunningEngineJob {
 pub struct JobManager {
     pub optimizer: Option<RunningOptimization>,
     pub engine: Option<RunningEngineJob>,
+    /// In-flight background decode of an entry's trajectory file for playback.
+    pub trajectory_load: Option<crate::frontend::trajectory::RunningTrajectoryLoad>,
 }
 
 impl JobManager {

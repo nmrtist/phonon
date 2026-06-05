@@ -1443,6 +1443,27 @@ fn render_entry_list_item(
             .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 6.0, bg_fill);
 
         let text_rect = rect.shrink2(egui::vec2(6.0, 0.0));
+
+        // A small "MD" chip marks entries produced by an MD run (extensible to
+        // future provenance kinds). Lay it out first so the name reserves room.
+        let is_md = state
+            .entries
+            .entry(entry_id)
+            .map(|entry| entry.origin.is_md_run())
+            .unwrap_or(false);
+        let chip = is_md.then(|| {
+            let galley = ui.painter().fonts_mut(|fonts| {
+                fonts.layout_no_wrap(
+                    "MD".to_string(),
+                    egui::FontId::proportional(9.0),
+                    pal.accent,
+                )
+            });
+            let size = egui::vec2(galley.size().x + 8.0, galley.size().y + 3.0);
+            (galley, size)
+        });
+        let name_reserve = chip.as_ref().map_or(0.0, |(_, size)| size.x + 6.0);
+
         let mut job = egui::text::LayoutJob::single_section(
             name.to_string(),
             egui::TextFormat {
@@ -1452,7 +1473,7 @@ fn render_entry_list_item(
             },
         );
         job.wrap = egui::text::TextWrapping {
-            max_width: text_rect.width(),
+            max_width: (text_rect.width() - name_reserve).max(10.0),
             max_rows: 1,
             overflow_character: Some('…'),
             break_anywhere: true,
@@ -1463,6 +1484,23 @@ fn render_entry_list_item(
             text_rect.center().y - galley.size().y / 2.0,
         );
         ui.painter().galley(galley_pos, galley, text_color);
+
+        if let Some((chip_galley, chip_size)) = chip {
+            let chip_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    text_rect.right() - chip_size.x,
+                    text_rect.center().y - chip_size.y / 2.0,
+                ),
+                chip_size,
+            );
+            ui.painter()
+                .rect_filled(chip_rect, 4.0, pal.blue_overlay(45));
+            let chip_pos = egui::pos2(
+                chip_rect.center().x - chip_galley.size().x / 2.0,
+                chip_rect.center().y - chip_galley.size().y / 2.0,
+            );
+            ui.painter().galley(chip_pos, chip_galley, pal.accent);
+        }
 
         if response.double_clicked() {
             actions.push(AppAction::ActivateEntry(entry_id));
