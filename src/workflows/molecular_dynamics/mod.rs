@@ -25,6 +25,7 @@ pub mod catalog;
 pub mod framework;
 pub mod materials;
 pub mod protocol;
+pub mod run;
 pub mod solvation;
 pub mod system;
 pub mod topology;
@@ -44,6 +45,11 @@ pub use materials::{
 pub use protocol::{
     MdProtocolOptions, STAGE_EM, STAGE_NPT, STAGE_NVT, STAGE_PROD, apply_trajectory_output,
     equilibration_stages, full_protocol, production_stage,
+};
+pub use run::{
+    EffectiveContext, ForceFieldFamily, MdParameters, MdStage, MdSystemContext, PresetId,
+    PresetParams, ProductionLength, RecNote, Recommendation, RestraintScheme, StageEdits,
+    StageKind, StageLength, SystemTypeOverrides, ValidationIssue, ValueSource,
 };
 pub use solvation::{
     SolvationEstimate, SolvationOptions, SolvationReport, WaterModel, estimate, solvate,

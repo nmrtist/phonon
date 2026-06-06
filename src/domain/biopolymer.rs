@@ -270,6 +270,28 @@ pub fn is_nucleic_acid_residue(residue_name: &str) -> bool {
     )
 }
 
+/// Common PDB/lipid-builder residue names for membrane lipids and sterols
+/// (CHARMM-GUI / Slipids / AMBER Lipid conventions). Used to recognize a membrane
+/// system; not exhaustive — an unrecognized lipid is reported as "not detected"
+/// rather than misclassified, which is why detection is paired with a manual
+/// override.
+pub fn is_lipid_residue(residue_name: &str) -> bool {
+    matches!(
+        residue_name.trim(),
+        // Phosphatidylcholine / -ethanolamine / -glycerol / -serine / -inositol
+        "POPC" | "POPE" | "POPG" | "POPS" | "POPI" | "POPA"
+            | "DOPC" | "DOPE" | "DOPG" | "DOPS"
+            | "DPPC" | "DPPE" | "DPPG"
+            | "DMPC" | "DMPE" | "DMPG"
+            | "DLPC" | "DSPC" | "DSPE"
+            | "PLPC" | "SOPC" | "OPPC"
+            // Sterols
+            | "CHOL" | "CHL1" | "ERG"
+            // Sphingo / other
+            | "PSM" | "SSM" | "DPSM" | "CER"
+    )
+}
+
 /// A non-polymer residue (water molecule or ion) to splice into a biopolymer's
 /// per-atom coverage so that a solvated system stays self-consistent
 /// (`residue_for_atom.len() == atoms.len()`).
