@@ -167,13 +167,34 @@ fn render_trajectory_controls(
         .as_ref()
         .map(|load| load.entry_id)
         == Some(entry_id);
-    // An MD-run entry only offers playback when its run actually wrote a
-    // trajectory; a relax-only run is still badged but has nothing to play.
-    let has_trajectory = state
+
+    // Discover the per-stage trajectories that live next to the entry's recorded
+    // trajectory, so a multi-step run can be replayed stage by stage. A relax-
+    // only run (no trajectory) yields an empty list and just shows a hint.
+    let project_root = state
+        .workspace
+        .project()
+        .map(|project| project.root.clone());
+    let primary = state
         .entries
         .entry(entry_id)
-        .map(|entry| entry.origin.trajectory().is_some())
-        .unwrap_or(false);
+        .and_then(|entry| entry.origin.trajectory().map(|path| path.to_path_buf()));
+    let stages = match (&primary, &project_root) {
+        (Some(primary), Some(root)) => {
+            let mut stages = crate::frontend::trajectory::md_stage_trajectories(primary, root);
+            // Fall back to the recorded trajectory itself if the directory scan
+            // turned up nothing (e.g. the file was moved out of its run dir).
+            if stages.is_empty() {
+                stages.push(crate::frontend::trajectory::MdStage {
+                    label: "MD".to_string(),
+                    path: primary.clone(),
+                });
+            }
+            stages
+        }
+        _ => Vec::new(),
+    };
+
     // Snapshot the playback cursor so we don't hold a borrow while emitting
     // actions (the dispatcher mutates the same state next frame).
     let playback = state
@@ -187,11 +208,32 @@ fn render_trajectory_controls(
                 playback.current_frame,
                 playback.frame_count(),
                 playback.trajectory.time(playback.current_frame),
+                playback.source.clone(),
             )
         });
+    let active_source = playback.as_ref().map(|(.., source)| source.clone());
 
     ui.horizontal(|ui| {
-        if let Some((playing, current, count, time)) = playback {
+        // Stage chips: one per step's trajectory, in run order. Clicking loads
+        // that stage; the active stage is highlighted.
+        for stage in &stages {
+            let active = active_source.as_deref() == Some(stage.path.as_path());
+            if ui
+                .selectable_label(active, RichText::new(stage.label.as_str()).monospace())
+                .on_hover_text("Play this step")
+                .clicked()
+            {
+                actions.push(AppAction::LoadTrajectory(
+                    entry_id,
+                    Some(stage.path.clone()),
+                ));
+            }
+        }
+        if !stages.is_empty() {
+            ui.separator();
+        }
+
+        if let Some((playing, current, count, time, _)) = playback {
             let icon = if playing { icons::PAUSE } else { icons::PLAY };
             if ui
                 .button(RichText::new(icon).size(16.0))
@@ -229,12 +271,21 @@ fn render_trajectory_controls(
         } else if loading {
             ui.add(egui::Spinner::new());
             ui.label(RichText::new("Decoding trajectory…").color(pal.text_muted));
-        } else if has_trajectory {
+        } else if stages.len() > 1 {
+            ui.label(
+                RichText::new("Select a step to play back")
+                    .small()
+                    .color(pal.text_tertiary),
+            );
+        } else if let Some(stage) = stages.first() {
             if ui
                 .button(RichText::new(format!("{}  Play trajectory", icons::PLAY)))
                 .clicked()
             {
-                actions.push(AppAction::LoadTrajectory(entry_id));
+                actions.push(AppAction::LoadTrajectory(
+                    entry_id,
+                    Some(stage.path.clone()),
+                ));
             }
             ui.label(
                 RichText::new("from MD run output")

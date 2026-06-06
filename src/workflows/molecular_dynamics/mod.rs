@@ -42,8 +42,8 @@ pub use materials::{
 };
 
 pub use protocol::{
-    MdProtocolOptions, STAGE_EM, STAGE_NPT, STAGE_NVT, STAGE_PROD, equilibration_stages,
-    full_protocol, production_stage,
+    MdProtocolOptions, STAGE_EM, STAGE_NPT, STAGE_NVT, STAGE_PROD, apply_trajectory_output,
+    equilibration_stages, full_protocol, production_stage,
 };
 pub use solvation::{
     SolvationEstimate, SolvationOptions, SolvationReport, WaterModel, estimate, solvate,

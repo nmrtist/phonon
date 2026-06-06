@@ -135,7 +135,9 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::BrowseEngineProgram(id) => browse_engine_program(state, id),
         AppAction::RunConsoleCommand(command) => run_console_command(state, &command),
         AppAction::SetThemeMode(mode) => set_theme_mode(state, mode, ctx),
-        AppAction::LoadTrajectory(entry_id) => load_trajectory(state, entry_id, ctx),
+        AppAction::LoadTrajectory(entry_id, trajectory) => {
+            load_trajectory(state, entry_id, trajectory, ctx)
+        }
         AppAction::ToggleTrajectoryPlay => toggle_trajectory_play(state, ctx),
         AppAction::SetTrajectoryFrame(frame) => set_trajectory_frame(state, frame),
         AppAction::StopTrajectory => stop_trajectory(state),
@@ -285,6 +287,7 @@ fn poll_trajectory_jobs(state: &mut AppState, ctx: &egui::Context) {
                     let now = ctx.input(|input| input.time);
                     let mut playback = TrajectoryPlayback {
                         entry_id: load.entry_id,
+                        source: load.source,
                         trajectory,
                         scratch: load.base_structure,
                         current_frame: 0,
@@ -342,32 +345,56 @@ fn advance_trajectory_playback(state: &mut AppState, ctx: &egui::Context) {
     ctx.request_repaint_after(Duration::from_secs_f64(interval));
 }
 
-/// Begin (or resume) playback of an entry's MD trajectory. The trajectory file
-/// lives in the run directory and is decoded in the background; this only kicks
-/// off the load (or restarts playback if it is already loaded).
-fn load_trajectory(state: &mut AppState, entry_id: u64, ctx: &egui::Context) {
-    // Already playing this entry's trajectory: just ensure it is running.
-    if state.ui.trajectory.as_ref().map(|p| p.entry_id) == Some(entry_id) {
-        if let Some(playback) = state.ui.trajectory.as_mut() {
-            playback.playing = true;
-            playback.last_advance_secs = ctx.input(|input| input.time);
-        }
-        return;
-    }
-    // Already decoding this entry's trajectory.
-    if state.jobs.trajectory_load.as_ref().map(|l| l.entry_id) == Some(entry_id) {
-        return;
-    }
-
+/// Begin (or resume) playback of one of an entry's MD-run trajectories. The
+/// trajectory files live in the run directory and are decoded in the background;
+/// this only kicks off the load (or resumes if that exact stage is already
+/// loaded). `requested` selects a specific stage's trajectory (in the entry's
+/// stored form); `None` plays the entry's default (production) trajectory.
+fn load_trajectory(
+    state: &mut AppState,
+    entry_id: u64,
+    requested: Option<PathBuf>,
+    ctx: &egui::Context,
+) {
+    // Resolve which stage trajectory to play: the explicit request, else the
+    // entry's recorded default.
     state.ensure_entry_loaded(entry_id);
     let Some(entry) = state.entries.entry(entry_id) else {
         return;
     };
-    let Some(relative) = entry.origin.trajectory().map(|path| path.to_path_buf()) else {
-        state.set_message("This entry has no trajectory to play");
-        return;
-    };
+    let relative =
+        match requested.or_else(|| entry.origin.trajectory().map(|path| path.to_path_buf())) {
+            Some(relative) => relative,
+            None => {
+                state.set_message("This entry has no trajectory to play");
+                return;
+            }
+        };
     let base_structure = entry.structure.clone();
+
+    // Already playing exactly this stage: just ensure it is running.
+    if state
+        .ui
+        .trajectory
+        .as_ref()
+        .is_some_and(|p| p.entry_id == entry_id && p.source == relative)
+    {
+        if let Some(playback) = state.ui.trajectory.as_mut() {
+            playback.playing = true;
+            playback.last_advance_secs = ctx.input(|input| input.time);
+        }
+        ctx.request_repaint();
+        return;
+    }
+    // Already decoding exactly this stage.
+    if state
+        .jobs
+        .trajectory_load
+        .as_ref()
+        .is_some_and(|l| l.entry_id == entry_id && l.source == relative)
+    {
+        return;
+    }
 
     let Some(project) = state.workspace.project() else {
         state.set_message("Trajectory playback requires an open project");
@@ -383,10 +410,11 @@ fn load_trajectory(state: &mut AppState, entry_id: u64, ctx: &egui::Context) {
     }
 
     let include_cell = state.ui.viewport.show_cell;
-    // Drop any stale playback bound to a different entry.
+    // Drop any stale playback bound to a different entry or stage.
     state.ui.trajectory = None;
     state.jobs.trajectory_load = Some(spawn_trajectory_load(
         entry_id,
+        relative,
         absolute,
         base_structure,
         include_cell,
@@ -1787,7 +1815,7 @@ fn start_pending_md_run(state: &mut AppState) {
             return;
         }
     };
-    let mut stages = match build_md_stage_specs(&prompt.steps) {
+    let mut stages = match build_md_stage_specs(&prompt.steps, prompt.save_trajectory) {
         Ok(stages) => stages,
         Err(error) => {
             state.set_message(error.to_string());
@@ -1959,8 +1987,9 @@ fn cache_engine_override(
 
 fn build_md_stage_specs(
     steps: &[crate::frontend::state::MdRunStepPrompt],
+    save_trajectory: bool,
 ) -> anyhow::Result<Vec<StageSpec>> {
-    crate::frontend::md_support::build_md_stage_specs(steps)
+    crate::frontend::md_support::build_md_stage_specs(steps, save_trajectory)
 }
 
 /// Cheap availability resolve (no subprocess). Used to populate the panel on

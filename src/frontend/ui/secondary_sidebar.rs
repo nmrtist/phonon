@@ -1327,6 +1327,20 @@ fn render_md_run_task_panel(state: &mut AppState, ui: &mut egui::Ui, actions: &m
         }
 
         ui.separator();
+        ui.checkbox(
+            &mut prompt.save_trajectory,
+            "Save trajectory (play back each step)",
+        );
+        ui.label(
+            RichText::new(
+                "On by default. Each step writes a trajectory you can replay in the viewport; \
+                 turn off to keep only final structures.",
+            )
+            .small()
+            .color(egui::Color32::GRAY),
+        );
+
+        ui.separator();
         ui.checkbox(&mut prompt.show_advanced, "Advanced");
         if prompt.show_advanced {
             ui.label("Topology override (.top/.itp):");

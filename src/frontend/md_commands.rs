@@ -310,12 +310,16 @@ fn md_simulate(state: &mut AppState, args: &[String]) -> Result<String> {
     let temperature_k = flags.f32("temperature")?.unwrap_or(300.0);
     // Relax (EM/NVT/NPT) by default; `--no-relax` skips straight to production.
     let relax = !flags.flag("no-relax");
+    // Save a playable trajectory for every stage by default; `--no-trajectory`
+    // keeps only the final structures.
+    let save_trajectory = !flags.flag("no-trajectory");
 
     let options = MdProtocolOptions {
         production_ps,
         timestep_ps: 0.002,
         temperature_k,
         relax_before_production: relax,
+        save_trajectory,
     };
 
     let structure = require_boxed_structure(state)?;

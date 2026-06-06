@@ -989,13 +989,14 @@ AR  8
         })
         .expect("system preparation should succeed");
 
-        // Short production so the acceptance run completes quickly while still
-        // writing a trajectory frame (nstxout-compressed = 5000).
+        // Short production so the acceptance run completes quickly. Trajectory
+        // saving is on by default, so every stage writes a compressed `.xtc`.
         let options = MdProtocolOptions {
             production_ps: 20.0,
             timestep_ps: 0.002,
             temperature_k: 94.0,
             relax_before_production: true,
+            save_trajectory: true,
         };
 
         let results = run_pipeline(
@@ -1012,41 +1013,55 @@ AR  8
         let production = results.last().expect("production stage present");
         assert_eq!(production.structure.atoms.len(), 8);
         assert!(
-            production.trajectory.is_some(),
-            "production should write a compressed trajectory"
-        );
-        assert!(
             production.checkpoint.is_some(),
             "production should write a checkpoint"
         );
 
-        // Decode the GROMACS-produced trajectory end-to-end (the real-tool gate
-        // for trajectory playback): a genuine `.xtc` must parse into multiple
-        // frames over the same atom count, with finite Angstrom coordinates.
-        let trajectory_path = production
-            .trajectory
-            .as_ref()
-            .expect("production trajectory path");
-        let trajectory =
-            crate::io::trajectory::read_xtc(trajectory_path).expect("decode production .xtc");
-        assert!(
-            trajectory.frame_count() >= 1,
-            "trajectory should contain at least one frame"
-        );
-        assert_eq!(
-            trajectory.natoms(),
-            production.structure.atoms.len(),
-            "trajectory atom count should match the final structure"
-        );
-        for frame in 0..trajectory.frame_count() {
-            for atom in 0..trajectory.natoms() {
-                let position = trajectory.position(frame, atom);
+        // Every dynamics stage must write a decodable trajectory (the real-tool
+        // gate for per-stage playback): each genuine `.xtc` parses into one or
+        // more frames over the same atom count, with finite Angstrom coordinates.
+        // Minimization (`em`) relaxes to a minimum and writes no motion track.
+        let mut dynamics_trajectories = 0;
+        for stage in &results {
+            if stage.stage_name == "em" {
                 assert!(
-                    position.coords.iter().all(|value| value.is_finite()),
-                    "frame {frame} atom {atom} has non-finite coordinates"
+                    stage.trajectory.is_none(),
+                    "minimization should not write a trajectory"
                 );
+                continue;
             }
+            let trajectory_path = stage.trajectory.as_ref().unwrap_or_else(|| {
+                panic!("stage '{}' should write a trajectory", stage.stage_name)
+            });
+            let trajectory = crate::io::trajectory::read_xtc(trajectory_path)
+                .unwrap_or_else(|_| panic!("decode '{}' .xtc", stage.stage_name));
+            assert!(
+                trajectory.frame_count() >= 1,
+                "stage '{}' trajectory should contain at least one frame",
+                stage.stage_name
+            );
+            assert_eq!(
+                trajectory.natoms(),
+                stage.structure.atoms.len(),
+                "stage '{}' trajectory atom count should match its structure",
+                stage.stage_name
+            );
+            for frame in 0..trajectory.frame_count() {
+                for atom in 0..trajectory.natoms() {
+                    let position = trajectory.position(frame, atom);
+                    assert!(
+                        position.coords.iter().all(|value| value.is_finite()),
+                        "stage '{}' frame {frame} atom {atom} has non-finite coordinates",
+                        stage.stage_name
+                    );
+                }
+            }
+            dynamics_trajectories += 1;
         }
+        assert_eq!(
+            dynamics_trajectories, 3,
+            "NVT, NPT and production should each write a trajectory"
+        );
     }
 
     /// Like [`wsl_gromacs_full_md_pipeline_runs_end_to_end`], but the topology
@@ -1081,6 +1096,7 @@ AR  8
             timestep_ps: 0.002,
             temperature_k: 94.0,
             relax_before_production: true,
+            save_trajectory: true,
         };
 
         let results = run_pipeline(

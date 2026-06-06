@@ -10,7 +10,9 @@ use crate::{
         framework_freeze_selection, input::FreezeGroup,
     },
     frontend::state::{AppState, MdRunStepPrompt},
-    workflows::molecular_dynamics::{MdProtocolOptions, MdTopology, full_protocol},
+    workflows::molecular_dynamics::{
+        MdProtocolOptions, MdTopology, apply_trajectory_output, full_protocol,
+    },
 };
 
 pub const MD_TOPOLOGY_FILE: &str = "system_topology.json";
@@ -106,7 +108,10 @@ pub fn protocol_stage_specs(options: &MdProtocolOptions) -> Vec<StageSpec> {
     full_protocol(options)
 }
 
-pub fn build_md_stage_specs(steps: &[MdRunStepPrompt]) -> Result<Vec<StageSpec>> {
+pub fn build_md_stage_specs(
+    steps: &[MdRunStepPrompt],
+    save_trajectory: bool,
+) -> Result<Vec<StageSpec>> {
     if steps.is_empty() {
         bail!("Add at least one MD step");
     }
@@ -155,6 +160,10 @@ pub fn build_md_stage_specs(steps: &[MdRunStepPrompt]) -> Result<Vec<StageSpec>>
             last_checkpoint_stage = Some(stage_name.to_string());
         }
     }
+
+    // Save a playable trajectory for every step by default (each step's track is
+    // selectable in the viewport); honour the run's opt-out.
+    apply_trajectory_output(&mut stage_specs, save_trajectory);
 
     Ok(stage_specs)
 }
@@ -228,10 +237,13 @@ mod tests {
     fn continuation_after_minimization_starts_fresh() {
         // NPT placed directly after EM must not dangle on the (checkpoint-less)
         // minimization stage; it starts fresh instead.
-        let specs = build_md_stage_specs(&[
-            step(MdRunStepPreset::EnergyMinimization),
-            step(MdRunStepPreset::Npt),
-        ])
+        let specs = build_md_stage_specs(
+            &[
+                step(MdRunStepPreset::EnergyMinimization),
+                step(MdRunStepPreset::Npt),
+            ],
+            true,
+        )
         .unwrap();
         assert_eq!(specs.len(), 2);
         assert!(specs[0].links.checkpoint.is_none());
@@ -247,7 +259,7 @@ mod tests {
         let nvt = step(MdRunStepPreset::Nvt);
         let npt = step(MdRunStepPreset::Npt);
         let nvt_name = nvt.stage_name.clone();
-        let specs = build_md_stage_specs(&[em, nvt, npt]).unwrap();
+        let specs = build_md_stage_specs(&[em, nvt, npt], true).unwrap();
 
         // NVT is not a continuation; NPT continues from NVT's checkpoint.
         assert!(specs[1].links.checkpoint.is_none());

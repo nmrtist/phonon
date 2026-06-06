@@ -7,7 +7,9 @@
 //! (temperature, simulation time, whether to relax first); this module
 //! translates that into the engine stage chain.
 
-use crate::engines::gromacs::{FileRef, MdpSettings, StageFileRole, StageLinks, StageSpec};
+use crate::engines::gromacs::{
+    FileRef, MdpSettings, OutputFrequency, StageFileRole, StageLinks, StageSpec,
+};
 
 /// Canonical stage names, used both as `-deffnm` basenames and as the keys
 /// [`StageLinks`] reference.
@@ -15,6 +17,45 @@ pub const STAGE_EM: &str = "em";
 pub const STAGE_NVT: &str = "nvt";
 pub const STAGE_NPT: &str = "npt";
 pub const STAGE_PROD: &str = "md";
+
+/// Roughly how many trajectory frames each stage should write, so even a short
+/// stage produces a watchable track. The write interval is derived per stage
+/// from its step count; the playback reader subsamples to bound memory, so a
+/// long stage is not penalised for writing more frames than this.
+const TRAJECTORY_TARGET_FRAMES: u64 = 250;
+/// Bounds on the per-stage compressed-trajectory write interval (steps). The
+/// floor keeps a tiny stage from writing every step; the ceiling keeps a very
+/// long stage from writing absurdly often.
+const TRAJECTORY_MIN_INTERVAL: u64 = 1;
+const TRAJECTORY_MAX_INTERVAL: u64 = 5_000;
+
+/// Give every dynamics stage a compressed-trajectory write cadence (or clear
+/// it).
+///
+/// MD output is saved by default so each dynamics step of a run is playable;
+/// passing `save_trajectory = false` disables it (only final structures are
+/// kept). The interval targets [`TRAJECTORY_TARGET_FRAMES`] frames for the
+/// stage's length, so a short equilibration step still yields a usable track
+/// instead of two or three frames.
+///
+/// Minimization stages are left untouched: steepest-descent energy minimization
+/// relaxes to a local minimum rather than producing a motion trajectory, and
+/// GROMACS does not write a meaningful `.xtc` for it.
+pub fn apply_trajectory_output(stages: &mut [StageSpec], save_trajectory: bool) {
+    for spec in stages.iter_mut() {
+        if spec.settings.integrator.is_minimization() {
+            continue;
+        }
+        let interval = (spec.settings.nsteps / TRAJECTORY_TARGET_FRAMES)
+            .clamp(TRAJECTORY_MIN_INTERVAL, TRAJECTORY_MAX_INTERVAL) as u32;
+        let mut output = spec
+            .settings
+            .output
+            .unwrap_or_else(OutputFrequency::equilibration);
+        output.nstxout_compressed = if save_trajectory { interval } else { 0 };
+        spec.settings.output = Some(output);
+    }
+}
 
 /// Physical parameters for a molecular-dynamics run — the choices a user makes
 /// in the MD panel. Everything else is derived internally.
@@ -29,6 +70,9 @@ pub struct MdProtocolOptions {
     /// Run EM → NVT → NPT equilibration before production ("relax model system
     /// before simulation"). When false, only production runs.
     pub relax_before_production: bool,
+    /// Save a compressed trajectory for every stage so the run is playable. On
+    /// by default; disable only to skip writing trajectory files entirely.
+    pub save_trajectory: bool,
 }
 
 impl Default for MdProtocolOptions {
@@ -38,6 +82,7 @@ impl Default for MdProtocolOptions {
             timestep_ps: 0.002,
             temperature_k: 300.0,
             relax_before_production: true,
+            save_trajectory: true,
         }
     }
 }
@@ -120,6 +165,7 @@ pub fn full_protocol(options: &MdProtocolOptions) -> Vec<StageSpec> {
         Vec::new()
     };
     stages.push(production_stage(options));
+    apply_trajectory_output(&mut stages, options.save_trajectory);
     stages
 }
 
@@ -139,6 +185,70 @@ mod tests {
         let stages = full_protocol(&MdProtocolOptions::default());
         let names: Vec<&str> = stages.iter().map(|s| s.stage_name.as_str()).collect();
         assert_eq!(names, vec![STAGE_EM, STAGE_NVT, STAGE_NPT, STAGE_PROD]);
+    }
+
+    /// The compressed-trajectory write interval a stage will use (0 = none).
+    fn trajectory_interval(spec: &StageSpec) -> u32 {
+        spec.settings
+            .output
+            .as_ref()
+            .map_or(0, |output| output.nstxout_compressed)
+    }
+
+    #[test]
+    fn dynamics_stages_write_a_trajectory_by_default() {
+        // Saving on by default: every dynamics stage (NVT/NPT/production, not
+        // just production) gets a compressed-trajectory cadence, so each is
+        // playable. Minimization writes no track.
+        let stages = full_protocol(&MdProtocolOptions::default());
+        for spec in &stages {
+            if spec.settings.integrator.is_minimization() {
+                assert_eq!(
+                    trajectory_interval(spec),
+                    0,
+                    "minimization stage '{}' should not write a trajectory",
+                    spec.stage_name
+                );
+            } else {
+                assert!(
+                    trajectory_interval(spec) > 0,
+                    "dynamics stage '{}' should write a trajectory by default",
+                    spec.stage_name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opting_out_clears_every_stage_trajectory() {
+        let opts = MdProtocolOptions {
+            save_trajectory: false,
+            ..MdProtocolOptions::default()
+        };
+        let stages = full_protocol(&opts);
+        for spec in &stages {
+            assert_eq!(
+                trajectory_interval(spec),
+                0,
+                "stage '{}' should write no trajectory when saving is off",
+                spec.stage_name
+            );
+        }
+    }
+
+    #[test]
+    fn trajectory_interval_targets_a_watchable_frame_count() {
+        // A short stage still yields many frames (interval well under nsteps),
+        // not the two or three a coarse fixed interval would give.
+        let mut stages = full_protocol(&MdProtocolOptions::default());
+        apply_trajectory_output(&mut stages, true);
+        let prod = stage(&stages, STAGE_PROD);
+        let interval = prod.settings.output.as_ref().unwrap().nstxout_compressed as u64;
+        let frames = prod.settings.nsteps / interval.max(1);
+        assert!(
+            frames >= 100,
+            "production should yield a watchable track, got {frames} frames"
+        );
     }
 
     #[test]

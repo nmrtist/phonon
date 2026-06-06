@@ -579,6 +579,9 @@ pub struct MdRunPrompt {
     pub engine: MdEngineChoice,
     pub steps: Vec<MdRunStepPrompt>,
     pub topology_override_path: Option<PathBuf>,
+    /// Save a compressed trajectory for each step so the run is playable in the
+    /// viewport. On by default; the user can opt out per run.
+    pub save_trajectory: bool,
     pub show_advanced: bool,
 }
 
@@ -589,6 +592,7 @@ impl Default for MdRunPrompt {
             engine: MdEngineChoice::Gromacs,
             steps: Vec::new(),
             topology_override_path: None,
+            save_trajectory: true,
             show_advanced: false,
         }
     }

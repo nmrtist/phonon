@@ -102,9 +102,11 @@ pub enum AppAction {
     RunConsoleCommand(String),
     /// Set the light/dark appearance preference and persist it.
     SetThemeMode(crate::backend::config::ThemeMode),
-    /// Decode the given entry's MD trajectory (from its run directory) in the
-    /// background and begin playback once it is ready.
-    LoadTrajectory(u64),
+    /// Decode an MD trajectory for the given entry (from its run directory) in
+    /// the background and begin playback once it is ready. The optional path
+    /// selects a specific stage's trajectory (project-root-relative, as stored);
+    /// `None` plays the entry's default (production) trajectory.
+    LoadTrajectory(u64, Option<std::path::PathBuf>),
     /// Toggle play/pause of the active trajectory.
     ToggleTrajectoryPlay,
     /// Jump the active trajectory to a specific frame (pauses playback).
