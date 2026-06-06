@@ -1,18 +1,17 @@
-use std::{collections::HashSet, path::Path, path::PathBuf};
+use std::{path::Path, path::PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     backend::tasks::TaskKind,
     domain::Structure,
     engines::gromacs::{
-        FileRef, FreezeSelection, MdpSettings, StageFileRole, StageLinks, StageSpec,
-        framework_freeze_selection, input::FreezeGroup,
+        FreezeSelection, MdpSettings, StageSpec, framework_freeze_selection, input::FreezeGroup,
     },
-    frontend::state::{AppState, MdRunStepPrompt},
+    frontend::state::AppState,
     workflows::molecular_dynamics::{
-        MdProtocolOptions, MdSystemContext, MdTopology, apply_trajectory_output, full_protocol,
+        MdProtocolOptions, MdSystemContext, MdTopology, full_protocol,
     },
 };
 
@@ -163,93 +162,9 @@ pub fn protocol_stage_specs(options: &MdProtocolOptions) -> Vec<StageSpec> {
     full_protocol(options)
 }
 
-pub fn build_md_stage_specs(
-    steps: &[MdRunStepPrompt],
-    save_trajectory: bool,
-) -> Result<Vec<StageSpec>> {
-    if steps.is_empty() {
-        bail!("Add at least one MD step");
-    }
-
-    let mut stage_specs = Vec::with_capacity(steps.len());
-    let mut seen_stage_names = HashSet::new();
-    let mut previous_stage: Option<String> = None;
-    let mut last_checkpoint_stage: Option<String> = None;
-
-    for step in steps {
-        let stage_name = step.stage_name.trim();
-        if stage_name.is_empty() {
-            bail!("Each MD step needs a non-empty name");
-        }
-        let sanitized = sanitize_md_stage_name(stage_name);
-        if !seen_stage_names.insert(sanitized.clone()) {
-            bail!("MD step names must be unique");
-        }
-
-        let links = if let Some(previous_stage) = previous_stage.as_ref() {
-            StageLinks {
-                coordinates: FileRef::Stage {
-                    stage: previous_stage.clone(),
-                    role: StageFileRole::OutputGro,
-                },
-                checkpoint: if step.settings.continuation {
-                    last_checkpoint_stage.clone().map(|stage| FileRef::Stage {
-                        stage,
-                        role: StageFileRole::Checkpoint,
-                    })
-                } else {
-                    None
-                },
-            }
-        } else {
-            StageLinks::from_prepared()
-        };
-
-        stage_specs.push(StageSpec {
-            stage_name: stage_name.to_string(),
-            settings: step.settings.clone(),
-            links,
-        });
-        previous_stage = Some(stage_name.to_string());
-        if !step.settings.integrator.is_minimization() {
-            last_checkpoint_stage = Some(stage_name.to_string());
-        }
-    }
-
-    // Save a playable trajectory for every step by default (each step's track is
-    // selectable in the viewport); honour the run's opt-out.
-    apply_trajectory_output(&mut stage_specs, save_trajectory);
-
-    Ok(stage_specs)
-}
-
-fn sanitize_md_stage_name(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-    if cleaned.is_empty() {
-        "stage".to_string()
-    } else {
-        cleaned
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::state::{MdRunStepPreset, MdRunStepPrompt};
-
-    fn step(preset: MdRunStepPreset) -> MdRunStepPrompt {
-        MdRunStepPrompt::from_preset(preset, 300.0, 0.002)
-    }
-
-    fn checkpoint_stage(spec: &StageSpec) -> Option<String> {
-        match spec.links.checkpoint.as_ref()? {
-            FileRef::Stage { stage, .. } => Some(stage.clone()),
-            FileRef::PreparedConf => None,
-        }
-    }
 
     #[test]
     fn write_md_system_context_records_full_count_and_classifies_family() {
@@ -327,46 +242,5 @@ mod tests {
         meta.apply_to(&mut settings);
         assert!(settings.freeze.is_none());
         assert!(settings.periodic_molecules);
-    }
-
-    #[test]
-    fn continuation_after_minimization_starts_fresh() {
-        // NPT placed directly after EM must not dangle on the (checkpoint-less)
-        // minimization stage; it starts fresh instead.
-        let specs = build_md_stage_specs(
-            &[
-                step(MdRunStepPreset::EnergyMinimization),
-                step(MdRunStepPreset::Npt),
-            ],
-            true,
-        )
-        .unwrap();
-        assert_eq!(specs.len(), 2);
-        assert!(specs[0].links.checkpoint.is_none());
-        assert!(
-            checkpoint_stage(&specs[1]).is_none(),
-            "NPT after EM should not reference a checkpoint"
-        );
-    }
-
-    #[test]
-    fn continuation_links_to_last_md_stage_checkpoint() {
-        let em = step(MdRunStepPreset::EnergyMinimization);
-        let nvt = step(MdRunStepPreset::Nvt);
-        let npt = step(MdRunStepPreset::Npt);
-        let nvt_name = nvt.stage_name.clone();
-        let specs = build_md_stage_specs(&[em, nvt, npt], true).unwrap();
-
-        // NVT is not a continuation; NPT continues from NVT's checkpoint.
-        assert!(specs[1].links.checkpoint.is_none());
-        assert_eq!(
-            checkpoint_stage(&specs[2]).as_deref(),
-            Some(nvt_name.as_str())
-        );
-        // Coordinates always chain from the immediately previous stage.
-        match &specs[2].links.coordinates {
-            FileRef::Stage { stage, .. } => assert_eq!(stage, &nvt_name),
-            FileRef::PreparedConf => panic!("NPT should chain coordinates from NVT"),
-        }
     }
 }

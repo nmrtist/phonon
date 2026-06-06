@@ -94,6 +94,29 @@ pub enum AppAction {
     ImportCustomForceFieldFile,
     StartMdRun,
     CancelMdRunPrompt,
+    /// Select the Run MD preset; rebuilds the stage sequence for the system.
+    SetMdRunPreset(crate::workflows::molecular_dynamics::PresetId),
+    /// Set a system-type override (membrane/ligand/nucleic) for the run. Edits
+    /// the separate per-run overrides, never the persisted detection context, and
+    /// rebuilds the stages. `None` reverts that axis to "trust detection".
+    SetMdRunOverride(crate::frontend::state::MdSystemAxis, Option<bool>),
+    /// Set the run-level target temperature (K), applied to every stage.
+    SetMdRunTemperature(f32),
+    /// Set the production-length quick pick, applied to the production stage(s).
+    SetMdRunProduction(crate::workflows::molecular_dynamics::ProductionLength),
+    /// Set the run-level MD timestep (ps), applied to every dynamics stage.
+    SetMdRunTimestep(f32),
+    /// Toggle whether dynamics stages write a playable trajectory.
+    SetMdRunSaveTrajectory(bool),
+    /// Append a stage of the given kind to the run's sequence.
+    AddMdRunStage(crate::workflows::molecular_dynamics::StageKind),
+    /// Remove the stage at the given index from the run's sequence.
+    RemoveMdRunStage(usize),
+    /// Move the stage at the given index up (`true`) or down (`false`).
+    MoveMdRunStage {
+        index: usize,
+        up: bool,
+    },
     RefreshEngineRegistry,
     DetectEngineVersions,
     ApplyEngineOverride(crate::engines::registry::EngineId),

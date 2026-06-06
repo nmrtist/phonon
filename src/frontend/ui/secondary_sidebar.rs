@@ -1079,7 +1079,7 @@ fn run_name_field(ui: &mut egui::Ui, run_name: &mut String) {
 
 fn render_md_run_task_panel(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     if let Some(prompt) = &mut state.ui.pending_md_run {
-        use crate::frontend::state::{MdEngineChoice, MdRunStepPreset};
+        use crate::frontend::state::MdEngineChoice;
 
         run_name_field(ui, &mut prompt.run_name);
         ui.separator();
@@ -1096,249 +1096,299 @@ fn render_md_run_task_panel(state: &mut AppState, ui: &mut egui::Ui, actions: &m
         });
 
         ui.separator();
-        ui.label("Steps:");
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("+ Relax").clicked() {
-                prompt.add_relax_template();
-            }
-            if ui.button("+ EM").clicked() {
-                prompt.add_step(MdRunStepPreset::EnergyMinimization);
-            }
-            if ui.button("+ NVT").clicked() {
-                prompt.add_step(MdRunStepPreset::Nvt);
-            }
-            if ui.button("+ NPT").clicked() {
-                prompt.add_step(MdRunStepPreset::Npt);
-            }
-            if ui.button("+ MD").clicked() {
-                prompt.add_step(MdRunStepPreset::Production);
-            }
-            if ui.button("+ Custom").clicked() {
-                prompt.add_step(MdRunStepPreset::Custom);
-            }
-        });
 
-        let reference_temperature = prompt.reference_temperature();
-        let reference_timestep = prompt.reference_timestep();
-        let mut remove_index = None;
-        let mut move_up_index = None;
-        let mut move_down_index = None;
+        // Run the recommendation once (pure; reads only the effective context).
+        let recommendation = prompt
+            .effective()
+            .map(|eff| crate::workflows::molecular_dynamics::run::recommend(&eff));
 
-        let total_steps = prompt.steps.len();
-        for (index, step) in prompt.steps.iter_mut().enumerate() {
-            ui.add_space(6.0);
-            Frame::group(ui.style()).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Step {}", index + 1)).strong());
+        // --- Inherited system + system-type overrides ----------------------
+        if let Some(context) = prompt.context.clone() {
+            ui.label(RichText::new("Inherited system").strong());
+            ui.label(
+                RichText::new(format!(
+                    "Force field: {} ({}){}",
+                    context.force_field_token,
+                    context.force_field_family.label(),
+                    context
+                        .water_token
+                        .as_deref()
+                        .map(|water| format!(" · water {water}"))
+                        .unwrap_or_default(),
+                ))
+                .small()
+                .color(egui::Color32::GRAY),
+            );
+
+            // Override toggles edit the separate per-run overrides via actions and
+            // NEVER write back into the persisted detection context; each shows
+            // whether the value is auto-detected or user-set.
+            if let Some(eff) = prompt.effective() {
+                use crate::frontend::state::MdSystemAxis;
+                use crate::workflows::molecular_dynamics::ValueSource;
+                let axes = [
+                    (MdSystemAxis::Membrane, "Membrane", eff.membrane()),
+                    (MdSystemAxis::Ligand, "Ligand", eff.ligand()),
+                    (MdSystemAxis::Nucleic, "Nucleic acid", eff.nucleic()),
+                ];
+                for (axis, label, (value, source)) in axes {
+                    ui.horizontal(|ui| {
+                        let mut checked = value;
+                        if ui.checkbox(&mut checked, label).changed() {
+                            actions.push(AppAction::SetMdRunOverride(axis, Some(checked)));
+                        }
+                        match source {
+                            ValueSource::Detected => {
+                                ui.label(
+                                    RichText::new("auto-detected")
+                                        .small()
+                                        .color(egui::Color32::GRAY),
+                                );
+                            }
+                            ValueSource::Overridden => {
+                                ui.label(
+                                    RichText::new("you set")
+                                        .small()
+                                        .color(egui::Color32::LIGHT_BLUE),
+                                );
+                                if ui.small_button("auto").clicked() {
+                                    actions.push(AppAction::SetMdRunOverride(axis, None));
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
+            if let Some(rec) = &recommendation {
+                for note in &rec.notes {
                     ui.label(
-                        RichText::new(step.preset.label())
+                        RichText::new(format!("• {} → {}", note.reason, note.intent))
                             .small()
                             .color(egui::Color32::GRAY),
                     );
-                    if ui
-                        .add_enabled(
-                            index > 0,
-                            egui::Button::new(egui_phosphor::regular::ARROW_UP),
-                        )
-                        .clicked()
-                    {
-                        move_up_index = Some(index);
-                    }
-                    if ui
-                        .add_enabled(
-                            index + 1 < total_steps,
-                            egui::Button::new(egui_phosphor::regular::ARROW_DOWN),
-                        )
-                        .clicked()
-                    {
-                        move_down_index = Some(index);
-                    }
-                    if ui
-                        .add(egui::Button::new(egui_phosphor::regular::TRASH).frame(false))
-                        .clicked()
-                    {
-                        remove_index = Some(index);
-                    }
-                });
-
-                let previous_preset = step.preset;
-                ui.horizontal(|ui| {
-                    ui.label("Preset:");
-                    egui::ComboBox::from_id_salt(("md_run_step_preset", index))
-                        .selected_text(step.preset.label())
-                        .show_ui(ui, |ui| {
-                            for preset in MdRunStepPreset::all() {
-                                ui.selectable_value(&mut step.preset, *preset, preset.label());
-                            }
-                        });
-                });
-                if step.preset != previous_preset && step.preset != MdRunStepPreset::Custom {
-                    step.reapply_preset(step.preset, reference_temperature, reference_timestep);
                 }
-
-                ui.horizontal(|ui| {
-                    ui.label("Name:");
-                    ui.text_edit_singleline(&mut step.stage_name);
-                });
-
-                egui::Grid::new(format!("md_run_step_{index}"))
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        ui.label("nsteps:");
-                        ui.add(
-                            egui::DragValue::new(&mut step.settings.nsteps)
-                                .range(1..=1_000_000_000u64)
-                                .speed(50.0),
-                        );
-                        ui.end_row();
-
-                        if step.settings.integrator.is_minimization() {
-                            ui.label("emtol (kJ/mol/nm):");
-                            ui.add(
-                                egui::DragValue::new(&mut step.settings.emtol)
-                                    .range(0.1..=1.0e6_f32)
-                                    .speed(10.0),
-                            );
-                            ui.end_row();
-                            ui.label("emstep (nm):");
-                            ui.add(
-                                egui::DragValue::new(&mut step.settings.emstep)
-                                    .range(0.0001..=1.0_f32)
-                                    .speed(0.001),
-                            );
-                            ui.end_row();
-                        } else {
-                            ui.label("dt (ps):");
-                            ui.add(
-                                egui::DragValue::new(&mut step.settings.timestep_ps)
-                                    .range(0.0001..=0.1_f32)
-                                    .speed(0.0005)
-                                    .fixed_decimals(4),
-                            );
-                            ui.end_row();
-                            ui.label("continuation:");
-                            ui.checkbox(&mut step.settings.continuation, "");
-                            ui.end_row();
-                        }
-
-                        ui.label("Coulomb cutoff (nm):");
-                        ui.add(
-                            egui::DragValue::new(&mut step.settings.coulomb_cutoff_nm)
-                                .range(0.1..=5.0_f32)
-                                .speed(0.05),
-                        );
-                        ui.end_row();
-                        ui.label("VdW cutoff (nm):");
-                        ui.add(
-                            egui::DragValue::new(&mut step.settings.vdw_cutoff_nm)
-                                .range(0.1..=5.0_f32)
-                                .speed(0.05),
-                        );
-                        ui.end_row();
-                    });
-
-                if !step.settings.integrator.is_minimization() {
-                    let mut temperature_coupling = step.settings.temperature_coupling.is_some();
-                    let mut pressure_coupling = step.settings.pressure_coupling.is_some();
-                    let mut velocity_generation = step.settings.velocity_generation.is_some();
-                    let mut temperature_k = step
-                        .settings
-                        .temperature_coupling
-                        .as_ref()
-                        .and_then(|tc| tc.ref_t.first().copied())
-                        .or_else(|| {
-                            step.settings
-                                .velocity_generation
-                                .as_ref()
-                                .map(|velocity| velocity.gen_temp)
-                        })
-                        .unwrap_or(reference_temperature);
-
-                    ui.separator();
-                    egui::Grid::new(format!("md_run_step_md_controls_{index}"))
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            ui.label("target T (K):");
-                            ui.add(
-                                egui::DragValue::new(&mut temperature_k)
-                                    .range(1.0..=5_000.0_f32)
-                                    .speed(1.0),
-                            );
-                            ui.end_row();
-                            ui.label("thermostat:");
-                            ui.checkbox(&mut temperature_coupling, "");
-                            ui.end_row();
-                            ui.label("barostat:");
-                            ui.checkbox(&mut pressure_coupling, "");
-                            ui.end_row();
-                            ui.label("generate velocities:");
-                            ui.checkbox(&mut velocity_generation, "");
-                            ui.end_row();
-                        });
-
-                    if temperature_coupling {
-                        let tc = step.settings.temperature_coupling.get_or_insert_with(|| {
-                            crate::engines::gromacs::input::TemperatureCoupling::whole_system(
-                                temperature_k,
-                            )
-                        });
-                        for value in &mut tc.ref_t {
-                            *value = temperature_k;
-                        }
-                    } else {
-                        step.settings.temperature_coupling = None;
-                    }
-
-                    if pressure_coupling {
-                        step.settings.pressure_coupling.get_or_insert_with(|| {
-                            crate::engines::gromacs::input::PressureCoupling::isotropic()
-                        });
-                    } else {
-                        step.settings.pressure_coupling = None;
-                    }
-
-                    if velocity_generation {
-                        let velocity = step.settings.velocity_generation.get_or_insert(
-                            crate::engines::gromacs::input::VelocityGen {
-                                gen_temp: temperature_k,
-                                gen_seed: -1,
-                            },
-                        );
-                        velocity.gen_temp = temperature_k;
-                    } else {
-                        step.settings.velocity_generation = None;
-                    }
+                for warning in &rec.warnings {
+                    ui.label(
+                        RichText::new(format!("⚠ {warning}"))
+                            .small()
+                            .color(egui::Color32::YELLOW),
+                    );
                 }
-            });
-        }
-
-        if let Some(index) = move_up_index {
-            prompt.steps.swap(index - 1, index);
-        }
-        if let Some(index) = move_down_index {
-            prompt.steps.swap(index, index + 1);
-        }
-        if let Some(index) = remove_index {
-            prompt.steps.remove(index);
-        }
-        if prompt.steps.is_empty() {
-            ui.add_space(6.0);
-            ui.label("No steps yet. Add a template or a custom step.");
+            }
+        } else {
+            ui.label(
+                RichText::new("No build context found; using generic defaults.")
+                    .small()
+                    .color(egui::Color32::GRAY),
+            );
         }
 
         ui.separator();
-        ui.checkbox(
-            &mut prompt.save_trajectory,
-            "Save trajectory (play back each step)",
-        );
-        ui.label(
-            RichText::new(
-                "On by default. Each step writes a trajectory you can replay in the viewport; \
-                 turn off to keep only final structures.",
-            )
-            .small()
-            .color(egui::Color32::GRAY),
-        );
+
+        // --- Preset --------------------------------------------------------
+        {
+            use crate::workflows::molecular_dynamics::PresetId;
+            let recommended = recommendation.as_ref().map(|rec| rec.preset);
+            ui.horizontal(|ui| {
+                ui.label("Preset:");
+                egui::ComboBox::from_id_salt("md_run_preset")
+                    .selected_text(prompt.preset.title())
+                    .show_ui(ui, |ui| {
+                        for preset in PresetId::all() {
+                            let applies =
+                                prompt.effective().is_none_or(|eff| preset.applies_to(&eff));
+                            let star = if recommended == Some(*preset) {
+                                " ★"
+                            } else {
+                                ""
+                            };
+                            let na = if applies { "" } else { " (n/a)" };
+                            if ui
+                                .selectable_label(
+                                    prompt.preset == *preset,
+                                    format!("{}{star}{na}", preset.title()),
+                                )
+                                .clicked()
+                            {
+                                actions.push(AppAction::SetMdRunPreset(*preset));
+                            }
+                        }
+                    });
+            });
+            ui.label(
+                RichText::new(prompt.preset.description())
+                    .small()
+                    .color(egui::Color32::GRAY),
+            );
+        }
+
+        ui.separator();
+
+        // --- Basic parameters ----------------------------------------------
+        {
+            use crate::workflows::molecular_dynamics::ProductionLength;
+            egui::Grid::new("md_run_basic_params")
+                .num_columns(3)
+                .show(ui, |ui| {
+                    ui.label("Temperature (K):");
+                    let mut temperature = prompt.params.temperature_k;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut temperature)
+                                .range(1.0..=2_000.0_f32)
+                                .speed(1.0),
+                        )
+                        .changed()
+                    {
+                        actions.push(AppAction::SetMdRunTemperature(temperature));
+                    }
+                    if ui.small_button("310 K").clicked() {
+                        actions.push(AppAction::SetMdRunTemperature(310.0));
+                    }
+                    ui.end_row();
+
+                    ui.label("Production:");
+                    egui::ComboBox::from_id_salt("md_run_production")
+                        .selected_text(prompt.params.production.label())
+                        .show_ui(ui, |ui| {
+                            for length in ProductionLength::all() {
+                                if ui
+                                    .selectable_label(
+                                        prompt.params.production == *length,
+                                        length.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    actions.push(AppAction::SetMdRunProduction(*length));
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Timestep (ps):");
+                    let mut timestep = prompt.params.timestep_ps;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut timestep)
+                                .range(0.0005..=0.005_f32)
+                                .speed(0.0005)
+                                .fixed_decimals(4),
+                        )
+                        .changed()
+                    {
+                        actions.push(AppAction::SetMdRunTimestep(timestep));
+                    }
+                    ui.end_row();
+                });
+
+            let mut save = prompt.save_trajectory;
+            if ui
+                .checkbox(&mut save, "Save trajectory (play back each stage)")
+                .changed()
+            {
+                actions.push(AppAction::SetMdRunSaveTrajectory(save));
+            }
+        }
+
+        ui.separator();
+
+        // --- Stage sequence (add / remove / reorder) -----------------------
+        {
+            use crate::workflows::molecular_dynamics::StageKind;
+            ui.label(RichText::new("Stages").strong());
+            ui.horizontal_wrapped(|ui| {
+                let adds = [
+                    ("+ EM", StageKind::Minimize),
+                    ("+ NVT", StageKind::NvtEquilibrate),
+                    ("+ NPT", StageKind::NptEquilibrate),
+                    ("+ Production", StageKind::Produce),
+                    ("+ Anneal", StageKind::Anneal),
+                    ("+ Extend", StageKind::Extend),
+                ];
+                for (label, kind) in adds {
+                    if ui.button(label).clicked() {
+                        actions.push(AppAction::AddMdRunStage(kind));
+                    }
+                }
+            });
+
+            let total = prompt.stages.len();
+            for (index, stage) in prompt.stages.iter().enumerate() {
+                ui.add_space(4.0);
+                Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{}. {}", index + 1, stage.name)).strong());
+                        ui.label(
+                            RichText::new(stage.kind.label())
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                        if ui
+                            .add_enabled(
+                                index > 0,
+                                egui::Button::new(egui_phosphor::regular::ARROW_UP),
+                            )
+                            .clicked()
+                        {
+                            actions.push(AppAction::MoveMdRunStage { index, up: true });
+                        }
+                        if ui
+                            .add_enabled(
+                                index + 1 < total,
+                                egui::Button::new(egui_phosphor::regular::ARROW_DOWN),
+                            )
+                            .clicked()
+                        {
+                            actions.push(AppAction::MoveMdRunStage { index, up: false });
+                        }
+                        if ui
+                            .add(egui::Button::new(egui_phosphor::regular::TRASH).frame(false))
+                            .clicked()
+                        {
+                            actions.push(AppAction::RemoveMdRunStage(index));
+                        }
+                    });
+                    let mut summary = format!("{} steps", stage.steps());
+                    if stage.restraint.is_restrained() {
+                        summary.push_str(" · restrained");
+                    }
+                    if stage.pressure.is_some() {
+                        summary.push_str(" · NPT");
+                    }
+                    ui.label(RichText::new(summary).small().color(egui::Color32::GRAY));
+                });
+            }
+            if prompt.stages.is_empty() {
+                ui.add_space(4.0);
+                ui.label("No stages yet. Add one above or pick a preset.");
+            }
+        }
+
+        // --- Validation ----------------------------------------------------
+        if let Some(eff) = prompt.effective() {
+            use crate::workflows::molecular_dynamics::run::IssueSeverity;
+            let issues = crate::workflows::molecular_dynamics::run::validate(&prompt.stages, &eff);
+            if !issues.is_empty() {
+                ui.separator();
+                for issue in &issues {
+                    let (color, prefix) = match issue.severity {
+                        IssueSeverity::Error => (egui::Color32::LIGHT_RED, "error"),
+                        IssueSeverity::Warning => (egui::Color32::YELLOW, "warning"),
+                    };
+                    let stage = issue
+                        .stage
+                        .as_deref()
+                        .map(|name| format!("[{name}] "))
+                        .unwrap_or_default();
+                    ui.label(
+                        RichText::new(format!("{prefix}: {stage}{}", issue.message))
+                            .small()
+                            .color(color),
+                    );
+                }
+            }
+        }
 
         ui.separator();
         ui.checkbox(&mut prompt.show_advanced, "Advanced");

@@ -21,7 +21,7 @@ use crate::{
     },
     domain::Structure,
     engines::{
-        gromacs::{BuildRequest, IonOptions, StageSpec, TopologySource, render_top},
+        gromacs::{BuildRequest, IonOptions, TopologySource, render_top},
         registry::{EngineId, EngineRegistry},
     },
     frontend::{
@@ -130,6 +130,29 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::ImportCustomForceFieldFile => import_custom_force_field_file(state),
         AppAction::StartMdRun => start_pending_md_run(state),
         AppAction::CancelMdRunPrompt => cancel_pending_md_run_request(state),
+        AppAction::SetMdRunPreset(preset) => set_md_run_preset(state, preset),
+        AppAction::SetMdRunOverride(axis, value) => set_md_run_override(state, axis, value),
+        AppAction::SetMdRunTemperature(temperature) => {
+            with_md_run_prompt(state, |prompt| prompt.apply_temperature(temperature))
+        }
+        AppAction::SetMdRunProduction(production) => {
+            with_md_run_prompt(state, |prompt| prompt.apply_production(production))
+        }
+        AppAction::SetMdRunTimestep(timestep) => {
+            with_md_run_prompt(state, |prompt| prompt.apply_timestep(timestep))
+        }
+        AppAction::SetMdRunSaveTrajectory(save) => {
+            with_md_run_prompt(state, |prompt| prompt.set_save_trajectory(save))
+        }
+        AppAction::AddMdRunStage(kind) => {
+            with_md_run_prompt(state, |prompt| prompt.add_stage(kind))
+        }
+        AppAction::RemoveMdRunStage(index) => {
+            with_md_run_prompt(state, |prompt| prompt.remove_stage(index))
+        }
+        AppAction::MoveMdRunStage { index, up } => {
+            with_md_run_prompt(state, |prompt| prompt.move_stage(index, up))
+        }
         AppAction::RefreshEngineRegistry => reprobe_engines(state),
         AppAction::DetectEngineVersions => detect_engine_versions(state),
         AppAction::ApplyEngineOverride(id) => apply_engine_override(state, id),
@@ -1057,9 +1080,27 @@ pub(super) fn ensure_panel_form(state: &mut AppState, task_run_id: u64) {
         TaskPanelKind::MdRunPrompt => {
             let default_name =
                 crate::backend::runs::default_run_name(&state.runs_dir(), task.controller_id);
+            // Load the inherited build-time context (or derive a minimal one) and
+            // run the recommendation once, before borrowing the prompt mutably.
+            let needs_init = state
+                .ui
+                .pending_md_run
+                .as_ref()
+                .is_none_or(|prompt| prompt.context.is_none());
+            let context = needs_init.then(|| load_or_derive_md_context(state));
+
             let prompt = state.ui.pending_md_run.get_or_insert_with(Default::default);
             if prompt.run_name.trim().is_empty() {
                 prompt.run_name = default_name;
+            }
+            if let Some(context) = context {
+                let recommendation = crate::workflows::molecular_dynamics::run::recommend(
+                    &context.with_overrides(prompt.overrides),
+                );
+                prompt.preset = recommendation.preset;
+                prompt.params = recommendation.prefill;
+                prompt.context = Some(context);
+                prompt.rebuild_stages();
             }
         }
         TaskPanelKind::ReticularBuilder => {
@@ -1810,6 +1851,27 @@ fn start_pending_md_run(state: &mut AppState) {
         state.set_message("MD runs need a structure with a simulation box".to_string());
         return;
     }
+    // Validate the neutral stage sequence against the effective context; errors
+    // block the run with an explanatory message.
+    if let Some(eff) = prompt.effective() {
+        let issues = crate::workflows::molecular_dynamics::run::validate(&prompt.stages, &eff);
+        if crate::workflows::molecular_dynamics::run::has_errors(&issues) {
+            let first = issues
+                .iter()
+                .find(|issue| {
+                    issue.severity
+                        == crate::workflows::molecular_dynamics::run::IssueSeverity::Error
+                })
+                .map(|issue| issue.message.clone())
+                .unwrap_or_default();
+            state.set_message(format!("Cannot run: {first}"));
+            return;
+        }
+    }
+    if prompt.stages.is_empty() {
+        state.set_message("Add at least one MD stage".to_string());
+        return;
+    }
     let topology = match resolve_md_topology_source(state, &prompt) {
         Ok(topology) => topology,
         Err(error) => {
@@ -1817,13 +1879,13 @@ fn start_pending_md_run(state: &mut AppState) {
             return;
         }
     };
-    let mut stages = match build_md_stage_specs(&prompt.steps, prompt.save_trajectory) {
-        Ok(stages) => stages,
-        Err(error) => {
-            state.set_message(error.to_string());
-            return;
-        }
-    };
+    // Realize the neutral stages into GROMACS stage specs (modern engine assumed;
+    // no version probing on the UI thread).
+    let mut stages = crate::engines::gromacs::stage_specs_from_md_stages(
+        &prompt.stages,
+        prompt.force_field_family(),
+        None,
+    );
     // A framework (nanosheet) system carries run hints from its build: keep the
     // molecule periodic (flexible) and/or freeze the sheet (rigid). Apply them to
     // every stage and capture the freeze selection for prepare_system.
@@ -1987,11 +2049,64 @@ fn cache_engine_override(
     true
 }
 
-fn build_md_stage_specs(
-    steps: &[crate::frontend::state::MdRunStepPrompt],
-    save_trajectory: bool,
-) -> anyhow::Result<Vec<StageSpec>> {
-    crate::frontend::md_support::build_md_stage_specs(steps, save_trajectory)
+/// Load the MD system context recorded by the active entry's build, or derive a
+/// minimal one from the active structure (generic family) when none was recorded.
+fn load_or_derive_md_context(
+    state: &AppState,
+) -> crate::workflows::molecular_dynamics::MdSystemContext {
+    use crate::workflows::molecular_dynamics::{MdSystemContext, is_framework_shape};
+    if let Some(id) = state.entries.active_entry_id()
+        && let Some(context) =
+            crate::frontend::md_support::load_md_system_context_for_entry(state, id)
+    {
+        return context;
+    }
+    let structure = state.structure();
+    MdSystemContext::from_built(
+        structure,
+        "builtin",
+        None,
+        is_framework_shape(structure),
+        0.0,
+        false,
+        Vec::new(),
+    )
+}
+
+/// Edit the Run MD prompt in place (the dispatcher is the only mutator of state).
+fn with_md_run_prompt(
+    state: &mut AppState,
+    edit: impl FnOnce(&mut crate::frontend::state::MdRunPrompt),
+) {
+    if let Some(prompt) = state.ui.pending_md_run.as_mut() {
+        edit(prompt);
+    }
+}
+
+/// Change the Run MD preset and rebuild the stage sequence for the context.
+fn set_md_run_preset(state: &mut AppState, preset: crate::workflows::molecular_dynamics::PresetId) {
+    with_md_run_prompt(state, |prompt| {
+        prompt.preset = preset;
+        prompt.rebuild_stages();
+    });
+}
+
+/// Set a system-type override and rebuild the stages. Edits the per-run overrides
+/// only — the persisted detection context is never touched.
+fn set_md_run_override(
+    state: &mut AppState,
+    axis: crate::frontend::state::MdSystemAxis,
+    value: Option<bool>,
+) {
+    use crate::frontend::state::MdSystemAxis;
+    with_md_run_prompt(state, |prompt| {
+        match axis {
+            MdSystemAxis::Membrane => prompt.overrides.membrane = value,
+            MdSystemAxis::Ligand => prompt.overrides.ligand = value,
+            MdSystemAxis::Nucleic => prompt.overrides.nucleic = value,
+        }
+        prompt.rebuild_stages();
+    });
 }
 
 /// Cheap availability resolve (no subprocess). Used to populate the panel on

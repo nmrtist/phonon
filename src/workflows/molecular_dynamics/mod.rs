@@ -47,9 +47,10 @@ pub use protocol::{
     equilibration_stages, full_protocol, production_stage,
 };
 pub use run::{
-    EffectiveContext, ForceFieldFamily, MdParameters, MdStage, MdSystemContext, PresetId,
-    PresetParams, ProductionLength, RecNote, Recommendation, RestraintScheme, StageEdits,
-    StageKind, StageLength, SystemTypeOverrides, ValidationIssue, ValueSource,
+    AnnealSpec, DEFAULT_TRAJECTORY_FRAMES, EffectiveContext, ForceFieldFamily, MdParameters,
+    MdStage, MdSystemContext, PresetId, PresetParams, ProductionLength, RecNote, Recommendation,
+    RestraintScheme, StageEdits, StageKind, StageLength, SystemTypeOverrides, ValidationIssue,
+    ValueSource,
 };
 pub use solvation::{
     SolvationEstimate, SolvationOptions, SolvationReport, WaterModel, estimate, solvate,

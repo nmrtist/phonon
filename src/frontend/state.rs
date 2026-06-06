@@ -488,100 +488,39 @@ impl MdEngineChoice {
     }
 }
 
+/// Which detected system-type flag a Run MD override toggle edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MdRunStepPreset {
-    EnergyMinimization,
-    Nvt,
-    Npt,
-    Production,
-    Custom,
+pub enum MdSystemAxis {
+    Membrane,
+    Ligand,
+    Nucleic,
 }
 
-impl MdRunStepPreset {
-    pub fn all() -> &'static [Self] {
-        &[
-            Self::EnergyMinimization,
-            Self::Nvt,
-            Self::Npt,
-            Self::Production,
-            Self::Custom,
-        ]
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::EnergyMinimization => "EM",
-            Self::Nvt => "NVT",
-            Self::Npt => "NPT",
-            Self::Production => "MD",
-            Self::Custom => "Custom",
-        }
-    }
-
-    pub fn default_stage_name(self) -> &'static str {
-        match self {
-            Self::EnergyMinimization => "em",
-            Self::Nvt => "nvt",
-            Self::Npt => "npt",
-            Self::Production => "md",
-            Self::Custom => "step",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MdRunStepPrompt {
-    pub preset: MdRunStepPreset,
-    pub stage_name: String,
-    pub settings: crate::engines::gromacs::MdpSettings,
-}
-
-impl MdRunStepPrompt {
-    pub fn from_preset(preset: MdRunStepPreset, temperature_k: f32, timestep_ps: f32) -> Self {
-        let mut settings = match preset {
-            MdRunStepPreset::EnergyMinimization => {
-                crate::engines::gromacs::MdpSettings::energy_minimization()
-            }
-            MdRunStepPreset::Nvt => crate::engines::gromacs::MdpSettings::nvt(temperature_k),
-            MdRunStepPreset::Npt => crate::engines::gromacs::MdpSettings::npt(temperature_k),
-            MdRunStepPreset::Production => {
-                crate::engines::gromacs::MdpSettings::production(500_000, temperature_k)
-            }
-            MdRunStepPreset::Custom => crate::engines::gromacs::MdpSettings::default(),
-        };
-        if !settings.integrator.is_minimization() {
-            settings.timestep_ps = timestep_ps;
-        }
-        Self {
-            preset,
-            stage_name: preset.default_stage_name().to_string(),
-            settings,
-        }
-    }
-
-    pub fn reapply_preset(
-        &mut self,
-        preset: MdRunStepPreset,
-        temperature_k: f32,
-        timestep_ps: f32,
-    ) {
-        let stage_name = self.stage_name.clone();
-        *self = Self::from_preset(preset, temperature_k, timestep_ps);
-        self.stage_name = stage_name;
-    }
-}
-
+/// Recommendation-led draft for a Run MD launch. Holds the inherited build-time
+/// detection (`context`, read-only) strictly separate from the user's
+/// per-run corrections (`overrides`), so an override never writes back into the
+/// persisted context. The editable `stages` are the engine-neutral
+/// [`MdStage`](crate::workflows::molecular_dynamics::MdStage) sequence; changing
+/// the preset or an override rebuilds them, while Basic-parameter edits and
+/// add/remove/reorder mutate them in place.
 #[derive(Debug, Clone)]
 pub struct MdRunPrompt {
-    /// Human-readable run name; becomes the run directory's name. Seeded with a
-    /// suggested `{kind}-N` when the panel opens, but freely editable.
+    /// Human-readable run name; becomes the run directory's name.
     pub run_name: String,
     pub engine: MdEngineChoice,
-    pub steps: Vec<MdRunStepPrompt>,
-    pub topology_override_path: Option<PathBuf>,
-    /// Save a compressed trajectory for each step so the run is playable in the
-    /// viewport. On by default; the user can opt out per run.
+    /// Inherited build-time detection record (read-only). `None` until loaded
+    /// when the panel opens.
+    pub context: Option<crate::workflows::molecular_dynamics::MdSystemContext>,
+    /// Per-run user corrections to the detected system types; never written back
+    /// into `context`.
+    pub overrides: crate::workflows::molecular_dynamics::SystemTypeOverrides,
+    pub preset: crate::workflows::molecular_dynamics::PresetId,
+    pub params: crate::workflows::molecular_dynamics::PresetParams,
+    /// The editable stage sequence.
+    pub stages: Vec<crate::workflows::molecular_dynamics::MdStage>,
+    /// Save a compressed trajectory for each dynamics stage. On by default.
     pub save_trajectory: bool,
+    pub topology_override_path: Option<PathBuf>,
     pub show_advanced: bool,
 }
 
@@ -590,57 +529,149 @@ impl Default for MdRunPrompt {
         Self {
             run_name: String::new(),
             engine: MdEngineChoice::Gromacs,
-            steps: Vec::new(),
-            topology_override_path: None,
+            context: None,
+            overrides: Default::default(),
+            preset: crate::workflows::molecular_dynamics::PresetId::StandardBiomolecule,
+            params: crate::workflows::molecular_dynamics::PresetParams::default(),
+            stages: Vec::new(),
             save_trajectory: true,
+            topology_override_path: None,
             show_advanced: false,
         }
     }
 }
 
 impl MdRunPrompt {
-    pub fn reference_temperature(&self) -> f32 {
-        self.steps
-            .iter()
-            .find_map(|step| {
-                step.settings
-                    .temperature_coupling
-                    .as_ref()
-                    .and_then(|tc| tc.ref_t.first().copied())
-                    .or_else(|| {
-                        step.settings
-                            .velocity_generation
-                            .as_ref()
-                            .map(|velocity| velocity.gen_temp)
-                    })
-            })
-            .unwrap_or(300.0)
+    /// The effective context (detection overlaid with overrides) used for
+    /// recommendation, preset building, and validation.
+    pub fn effective(&self) -> Option<crate::workflows::molecular_dynamics::EffectiveContext<'_>> {
+        self.context
+            .as_ref()
+            .map(|context| context.with_overrides(self.overrides))
     }
 
-    pub fn reference_timestep(&self) -> f32 {
-        self.steps
-            .iter()
-            .find_map(|step| {
-                (!step.settings.integrator.is_minimization() && step.settings.timestep_ps > 0.0)
-                    .then_some(step.settings.timestep_ps)
-            })
-            .unwrap_or(0.002)
+    /// The force-field family the run realizes against (generic if no context).
+    pub fn force_field_family(&self) -> crate::workflows::molecular_dynamics::ForceFieldFamily {
+        self.context.as_ref().map_or(
+            crate::workflows::molecular_dynamics::ForceFieldFamily::Other,
+            |context| context.force_field_family,
+        )
     }
 
-    pub fn add_step(&mut self, preset: MdRunStepPreset) {
-        let temperature_k = self.reference_temperature();
-        let timestep_ps = self.reference_timestep();
-        self.steps.push(MdRunStepPrompt::from_preset(
-            preset,
-            temperature_k,
-            timestep_ps,
-        ));
+    /// Rebuild the stage list from the current preset, params, and effective
+    /// context. Called when the preset or an override changes.
+    pub fn rebuild_stages(&mut self) {
+        if let Some(context) = &self.context {
+            let eff = context.with_overrides(self.overrides);
+            self.stages = self.preset.build(&eff, &self.params);
+            self.apply_trajectory_flag();
+        }
     }
 
-    pub fn add_relax_template(&mut self) {
-        self.add_step(MdRunStepPreset::EnergyMinimization);
-        self.add_step(MdRunStepPreset::Nvt);
-        self.add_step(MdRunStepPreset::Npt);
+    /// Apply the run-level temperature to every stage, preserving the stage list.
+    pub fn apply_temperature(&mut self, temperature_k: f32) {
+        self.params.temperature_k = temperature_k;
+        for stage in &mut self.stages {
+            stage.temperature_k = temperature_k;
+        }
+    }
+
+    /// Apply the run-level timestep to every dynamics stage.
+    pub fn apply_timestep(&mut self, timestep_ps: f32) {
+        self.params.timestep_ps = timestep_ps;
+        for stage in &mut self.stages {
+            if stage.kind.is_dynamics() {
+                stage.timestep_ps = timestep_ps;
+            }
+        }
+    }
+
+    /// Apply the run-level production length to the production/extend stage(s).
+    pub fn apply_production(
+        &mut self,
+        production: crate::workflows::molecular_dynamics::ProductionLength,
+    ) {
+        use crate::workflows::molecular_dynamics::{StageKind, StageLength};
+        self.params.production = production;
+        for stage in &mut self.stages {
+            if matches!(stage.kind, StageKind::Produce | StageKind::Extend) {
+                stage.length = StageLength::Picoseconds(production.picoseconds());
+            }
+        }
+    }
+
+    /// Toggle whether dynamics stages write a trajectory.
+    pub fn set_save_trajectory(&mut self, save: bool) {
+        self.save_trajectory = save;
+        self.apply_trajectory_flag();
+    }
+
+    fn apply_trajectory_flag(&mut self) {
+        let frames = self
+            .save_trajectory
+            .then_some(crate::workflows::molecular_dynamics::DEFAULT_TRAJECTORY_FRAMES);
+        for stage in &mut self.stages {
+            if stage.kind.is_dynamics() {
+                stage.trajectory_target_frames = frames;
+            }
+        }
+    }
+
+    /// Append a stage of the given kind, with a name made unique against the
+    /// existing stages (stage names key the run's file chaining).
+    pub fn add_stage(&mut self, kind: crate::workflows::molecular_dynamics::StageKind) {
+        use crate::workflows::molecular_dynamics::{AnnealSpec, MdStage, StageKind};
+        let t = self.params.temperature_k;
+        let mut stage = match kind {
+            StageKind::Minimize => MdStage::minimize(),
+            StageKind::NvtEquilibrate => MdStage::nvt(t),
+            StageKind::NptEquilibrate => MdStage::npt(t),
+            StageKind::Produce => MdStage::produce(t),
+            StageKind::Anneal => {
+                let mut stage = MdStage::nvt(t);
+                stage.kind = StageKind::Anneal;
+                stage.name = StageKind::Anneal.default_name().to_string();
+                stage.anneal = Some(AnnealSpec::ramp(t, t + 50.0, 500.0));
+                stage
+            }
+            StageKind::Extend => {
+                let mut stage = MdStage::produce(t);
+                stage.kind = StageKind::Extend;
+                stage.name = StageKind::Extend.default_name().to_string();
+                stage
+            }
+        };
+        if stage.kind.is_dynamics() {
+            stage.timestep_ps = self.params.timestep_ps;
+        }
+        self.assign_unique_name(&mut stage);
+        self.stages.push(stage);
+        self.apply_trajectory_flag();
+    }
+
+    fn assign_unique_name(&self, stage: &mut crate::workflows::molecular_dynamics::MdStage) {
+        let base = stage.name.clone();
+        let mut name = base.clone();
+        let mut suffix = 1;
+        while self.stages.iter().any(|existing| existing.name == name) {
+            suffix += 1;
+            name = format!("{base}{suffix}");
+        }
+        stage.name = name;
+    }
+
+    pub fn remove_stage(&mut self, index: usize) {
+        if index < self.stages.len() {
+            self.stages.remove(index);
+        }
+    }
+
+    pub fn move_stage(&mut self, index: usize, up: bool) {
+        if up && index > 0 {
+            self.stages.swap(index, index - 1);
+        } else if !up && index + 1 < self.stages.len() {
+            self.stages.swap(index, index + 1);
+        }
     }
 }
 
