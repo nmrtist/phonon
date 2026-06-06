@@ -5,13 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     backend::tasks::TaskKind,
+    domain::Structure,
     engines::gromacs::{
         FileRef, FreezeSelection, MdpSettings, StageFileRole, StageLinks, StageSpec,
         framework_freeze_selection, input::FreezeGroup,
     },
     frontend::state::{AppState, MdRunStepPrompt},
     workflows::molecular_dynamics::{
-        MdProtocolOptions, MdTopology, apply_trajectory_output, full_protocol,
+        MdProtocolOptions, MdSystemContext, MdTopology, apply_trajectory_output, full_protocol,
     },
 };
 
@@ -24,6 +25,60 @@ pub const MD_GROMACS_TOPOLOGY_FILE: &str = "topol.top";
 /// Run hints a framework (nanosheet) build records so a later MD run applies the
 /// right `.mdp`/freeze settings — written into the build run directory.
 pub const MD_FRAMEWORK_FILE: &str = "framework_run.json";
+
+/// The engine-neutral MD system context (force-field family, water, detected
+/// system types, net charge, restraint availability) a build records so a later
+/// "Run MD" can recommend a preset and values. Written into the build run
+/// directory, loaded the same way as [`MD_FRAMEWORK_FILE`].
+pub const MD_SYSTEM_CONTEXT_FILE: &str = "md_system_context.json";
+
+/// Build and persist the MD system context for a completed build into its run
+/// directory. `solute` supplies residue-based type detection (it carries the
+/// biopolymer metadata the solvated output may lack); `full_atom_count` is the
+/// final, post-solvation system size. Best-effort: a write failure is non-fatal —
+/// a later run simply falls back to a blank recommendation.
+#[allow(clippy::too_many_arguments)]
+pub fn write_md_system_context(
+    working_dir: &Path,
+    solute: &Structure,
+    full_atom_count: usize,
+    force_field_token: &str,
+    water_token: Option<&str>,
+    is_framework: bool,
+    net_charge: f32,
+    hmr_applied: bool,
+    restraint_groups: Vec<String>,
+) {
+    let mut context = MdSystemContext::from_built(
+        solute,
+        force_field_token,
+        water_token,
+        is_framework,
+        net_charge,
+        hmr_applied,
+        restraint_groups,
+    );
+    // Detection comes from the solute; the recorded size is the full solvated
+    // system, which is what "large system" recommendations key on.
+    context.atom_count = full_atom_count;
+    let _ = context.save(&working_dir.join(MD_SYSTEM_CONTEXT_FILE));
+}
+
+/// Load the MD system context recorded by the entry's latest completed MD system
+/// build, if any. Mirrors [`load_framework_metadata_for_entry`]. The first
+/// consumer is the Run MD recommendation surfaced in the GUI/console (next
+/// phase); the data is recorded now so it is available when that lands.
+#[allow(dead_code)]
+pub fn load_md_system_context_for_entry(
+    state: &AppState,
+    entry_id: u64,
+) -> Option<MdSystemContext> {
+    let run = state
+        .tasks
+        .latest_completed_run_for_result(TaskKind::BuildMdSystem, entry_id)?;
+    let path = run.run_dir.as_ref()?.join(MD_SYSTEM_CONTEXT_FILE);
+    path.exists().then(|| MdSystemContext::load(&path).ok())?
+}
 
 /// What a framework MD system needs a run to do: keep the molecule periodic
 /// (flexible model) and/or freeze the sheet (rigid model). Persisted by the
@@ -194,6 +249,47 @@ mod tests {
             FileRef::Stage { stage, .. } => Some(stage.clone()),
             FileRef::PreparedConf => None,
         }
+    }
+
+    #[test]
+    fn write_md_system_context_records_full_count_and_classifies_family() {
+        use crate::workflows::molecular_dynamics::ForceFieldFamily;
+        use nalgebra::Point3;
+
+        // A one-atom solute stands in for the pre-solvation system; the recorded
+        // size is the (larger) solvated count, while detection reads the solute.
+        let solute = Structure::new(
+            "solute",
+            vec![crate::domain::Atom {
+                element: "C".to_string(),
+                position: Point3::origin(),
+                charge: 0.0,
+            }],
+        );
+        let dir = std::env::temp_dir().join("phonon_md_context_write_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_md_system_context(
+            &dir,
+            &solute,
+            5_000,
+            "amber14sb",
+            Some("tip3p"),
+            false,
+            0.0,
+            false,
+            vec!["solute".to_string()],
+        );
+
+        let ctx = MdSystemContext::load(&dir.join(MD_SYSTEM_CONTEXT_FILE)).unwrap();
+        // The recorded size is the full solvated system, not the 1-atom solute.
+        assert_eq!(ctx.atom_count, 5_000);
+        assert_eq!(ctx.force_field_family, ForceFieldFamily::Amber);
+        assert_eq!(ctx.water_token.as_deref(), Some("tip3p"));
+        assert_eq!(ctx.restraint_groups, vec!["solute".to_string()]);
+        // A bare carbon atom has no biopolymer metadata: nothing is detected.
+        assert!(!ctx.detected_protein);
     }
 
     #[test]

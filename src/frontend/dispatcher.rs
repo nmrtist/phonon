@@ -31,7 +31,9 @@ use crate::{
             engine_poll_frame, optimization_finished_message, request_next_optimization_poll,
             spawn_gromacs_build_job, spawn_gromacs_pipeline_job, spawn_optimization_job,
         },
-        md_support::{gromacs_topology_path_for_entry, load_md_topology_for_entry},
+        md_support::{
+            gromacs_topology_path_for_entry, load_md_topology_for_entry, write_md_system_context,
+        },
         services::{
             BuildingBlockService, NanosheetService, ReticularService, StructureService,
             require_periodic_structure,
@@ -2319,6 +2321,8 @@ fn build_md_system_builtin(
     state: &mut AppState,
     prompt: &crate::frontend::state::MdSystemPrompt,
 ) -> bool {
+    // The pre-box solute carries any residue metadata system-type detection reads.
+    let solute = state.structure().clone();
     let config = prompt.config();
     let result = crate::workflows::molecular_dynamics::build_md_system(state.structure(), &config);
     let (boxed, report) = match result {
@@ -2343,15 +2347,18 @@ fn build_md_system_builtin(
         None => None,
     };
 
-    if let Err(error) = ensure_active_task_run_dir(
+    let run_dir = match ensure_active_task_run_dir(
         state,
         TaskKind::BuildMdSystem,
         Some(prompt.run_name.as_str()),
     ) {
-        state.set_message(format!("failed to create run directory: {error}"));
-        complete_active_task(state, TaskKind::BuildMdSystem, TaskStatus::Failed);
-        return false;
-    }
+        Ok(path) => path,
+        Err(error) => {
+            state.set_message(format!("failed to create run directory: {error}"));
+            complete_active_task(state, TaskKind::BuildMdSystem, TaskStatus::Failed);
+            return false;
+        }
+    };
     if let Some(task_run_id) = state.active_task_run {
         mark_task_status(state, task_run_id, TaskStatus::Running);
     }
@@ -2376,11 +2383,27 @@ fn build_md_system_builtin(
         ),
         None => (boxed, String::new()),
     };
+    let final_atom_count = final_structure.atoms.len();
     let save_path = structure_io::default_structure_save_path(&final_structure, None);
     let entry_id = add_and_show_entry(state, final_structure, None, save_path);
     if let Some(task_run_id) = state.active_task_run {
         record_task_result_entry(state, task_run_id, entry_id);
     }
+    // A built-in build is geometry-only — no force field is applied — so the
+    // context records the generic family (a later run uses the captured
+    // engine-neutral topology / cutoff path, not a biomolecular nonbonded block).
+    let water_token = prompt.solvate.then(|| prompt.water.db_token().to_string());
+    write_md_system_context(
+        &run_dir,
+        &solute,
+        final_atom_count,
+        "builtin",
+        water_token.as_deref(),
+        false,
+        0.0,
+        false,
+        Vec::new(),
+    );
 
     let [a, b, c] = report.edges_angstrom;
     let replaced = if report.replaced_existing_cell {

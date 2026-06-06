@@ -40,7 +40,7 @@ use crate::{
     frontend::{
         md_support::{
             FrameworkRunMetadata, MD_FRAMEWORK_FILE, MD_TOPOLOGY_FILE, md_topology_path_for_entry,
-            protocol_stage_specs,
+            protocol_stage_specs, write_md_system_context,
         },
         state::AppState,
     },
@@ -199,6 +199,8 @@ fn md_build(state: &mut AppState, args: &[String]) -> Result<String> {
             let mut topology = MdTopology::framework_with_custom(&structure, mode, &custom_types)?;
             topology.inline_force_field = custom_force_field.clone();
             let atom_count = structure.atoms.len();
+            let net_charge = topology.net_charge();
+            let solute = structure.clone();
             let save_path = structure_io::default_structure_save_path(&structure, None);
             let entry_id = state.entries.add_entry(structure, None, save_path);
             activate_entry(state, entry_id);
@@ -212,6 +214,19 @@ fn md_build(state: &mut AppState, args: &[String]) -> Result<String> {
                 framework_atom_count: atom_count,
             }
             .save(&run_dir.join(MD_FRAMEWORK_FILE))?;
+            // A framework has no biomolecular force-field convention (token
+            // classifies to the generic family) and uses freeze, not restraints.
+            write_md_system_context(
+                &run_dir,
+                &solute,
+                atom_count,
+                "framework",
+                None,
+                true,
+                net_charge,
+                false,
+                Vec::new(),
+            );
 
             return Ok(format!(
                 "Framework MD system ready ({} model): {atom_count} atoms; topology captured",
@@ -225,6 +240,7 @@ fn md_build(state: &mut AppState, args: &[String]) -> Result<String> {
         } else {
             state.structure().clone()
         };
+        let solute = structure.clone();
         let save_path = structure_io::default_structure_save_path(&structure, None);
         let entry_id = state.entries.add_entry(structure, None, save_path);
         activate_entry(state, entry_id);
@@ -232,6 +248,19 @@ fn md_build(state: &mut AppState, args: &[String]) -> Result<String> {
 
         let topology = MdTopology::from_structure(state.structure())?;
         topology.save(&run_dir.join(MD_TOPOLOGY_FILE))?;
+        // Geometry-only build: record the generic family (a later run uses the
+        // captured engine-neutral topology, not a biomolecular nonbonded block).
+        write_md_system_context(
+            &run_dir,
+            &solute,
+            topology.atom_count(),
+            "builtin",
+            None,
+            false,
+            topology.net_charge(),
+            false,
+            Vec::new(),
+        );
 
         Ok(format!(
             "MD system ready: {} atoms, {} species; topology captured",
