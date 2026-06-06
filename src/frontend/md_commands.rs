@@ -6,14 +6,20 @@
 //!   [`MdTopology`] (species + nonbonded parameters) for the project.
 //! * `md solvate`  — fill the box with water and ions (Phonon-native), replacing
 //!   the structure with the solvated system and extending the captured topology.
-//! * `md simulate` — run EM → NVT → NPT → production on that system, generating
-//!   every GROMACS file internally from the captured topology, then write
-//!   analysis data.
+//! * `md simulate` — run the fixed EM → NVT → NPT → production protocol (legacy
+//!   physical-intent command).
+//! * `md presets`  — list the preset library, marking the one recommended for the
+//!   active system.
+//! * `md run`      — the scriptable mirror of the GUI Run MD panel: pick a preset
+//!   (recommended by default) for the inherited system context, apply overrides
+//!   (`--temperature`, `--length`, `--set`, `--raw`, system-type toggles),
+//!   validate, then realize and run the GROMACS pipeline (PME for biomolecular
+//!   systems).
 //!
-//! Users make only physical choices (simulation time, temperature, whether to
-//! relax). No `.mdp`, topology, or group selection is ever surfaced. The
-//! commands run synchronously, which suits headless `.psh`/CLI use; the GUI
-//! drives the same engine functions on a worker thread.
+//! `md simulate` surfaces only physical choices; `md run` additionally exposes the
+//! preset library and tiered parameters. The commands run synchronously, which
+//! suits headless `.psh`/CLI use; the GUI drives the same engine functions on a
+//! worker thread.
 
 use std::{
     path::{Path, PathBuf},
@@ -33,21 +39,28 @@ use crate::{
         gromacs::{
             AnalysisContext, framework_run_hints, render_top, run_pipeline,
             runner::{PrepareSystemRequest, prepare_system},
+            stage_specs_from_md_stages,
             topology::TopologySource,
         },
         registry::{EngineId, EngineLaunch, EngineRegistry},
     },
     frontend::{
         md_support::{
-            FrameworkRunMetadata, MD_FRAMEWORK_FILE, MD_TOPOLOGY_FILE, md_topology_path_for_entry,
-            protocol_stage_specs, write_md_system_context,
+            FrameworkRunMetadata, MD_FRAMEWORK_FILE, MD_TOPOLOGY_FILE,
+            gromacs_topology_path_for_entry, load_md_system_context_for_entry,
+            md_topology_path_for_entry, protocol_stage_specs, write_md_system_context,
         },
         state::AppState,
     },
     io::structure_io,
     workflows::molecular_dynamics::{
         FrameworkMode, MdProtocolOptions, MdSystemConfig, MdTopology, SolvationOptions, WaterModel,
-        build_md_system, is_framework_shape, solvate,
+        build_md_system, is_framework_shape,
+        run::{
+            MdParameters, MdStage, MdSystemContext, PresetId, PresetParams, StageEdits, StageKind,
+            StageLength, SystemTypeOverrides, assemble, has_errors, recommend, validate,
+        },
+        solvate,
     },
 };
 
@@ -57,13 +70,17 @@ const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Dispatch `md <subcommand> ...`.
 pub fn md_command(state: &mut AppState, args: &[String]) -> Result<String> {
     let Some(sub) = args.first().map(String::as_str) else {
-        bail!("usage: md <build|solvate|simulate> [options]");
+        bail!("usage: md <build|solvate|simulate|presets|run> [options]");
     };
     match sub {
         "build" => md_build(state, &args[1..]),
         "solvate" => md_solvate(state, &args[1..]),
         "simulate" => md_simulate(state, &args[1..]),
-        other => bail!("unknown md subcommand `{other}` (expected build, solvate, or simulate)"),
+        "presets" => md_presets(state, &args[1..]),
+        "run" => md_run(state, &args[1..]),
+        other => bail!(
+            "unknown md subcommand `{other}` (expected build, solvate, simulate, presets, or run)"
+        ),
     }
 }
 
@@ -432,6 +449,276 @@ fn md_simulate(state: &mut AppState, args: &[String]) -> Result<String> {
     finish_cli_task(state, task_run_id, result)
 }
 
+// ---- md presets / md run ----------------------------------------------------
+
+/// `md presets`: list the preset library, marking the one recommended for the
+/// active system and flagging presets that don't apply to it.
+fn md_presets(state: &mut AppState, args: &[String]) -> Result<String> {
+    let flags = Flags::parse(args)?;
+    let context = load_or_derive_context(state);
+    let eff = context.with_overrides(parse_overrides(&flags));
+    let recommended = recommend(&eff).preset;
+
+    let mut out =
+        String::from("Presets (* = recommended for this system; (n/a) = not applicable):\n");
+    for preset in PresetId::all() {
+        let mark = if *preset == recommended { "*" } else { " " };
+        let na = if preset.applies_to(&eff) {
+            ""
+        } else {
+            "  (n/a)"
+        };
+        out.push_str(&format!(
+            "  {mark} {:<16} {}{na}\n",
+            preset.token(),
+            preset.title()
+        ));
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// `md run`: build a preset's stage sequence for the inherited system context
+/// (recommended preset by default), apply CLI overrides, validate, then realize
+/// and run the GROMACS pipeline. The scriptable mirror of the GUI Run MD panel.
+///
+/// Options: `--preset <id>` (default: recommended), `--temperature <K>`,
+/// `--length <time>` (production length), `--timestep <ps>`, the system-type
+/// overrides `--membrane|--no-membrane` (and `ligand`/`nucleic`),
+/// `--no-trajectory`, `--set key=val,...` (tiered parameters), and
+/// `--raw "key=val;..."` (verbatim engine passthrough).
+fn md_run(state: &mut AppState, args: &[String]) -> Result<String> {
+    let flags = Flags::parse(args)?;
+    let structure = require_boxed_structure(state)?;
+    let context = load_or_derive_context(state);
+    let eff = context.with_overrides(parse_overrides(&flags));
+
+    let preset = match flags.str("preset") {
+        Some(token) => PresetId::from_token(token)
+            .ok_or_else(|| anyhow!("unknown preset `{token}` (run `md presets` to list them)"))?,
+        None => recommend(&eff).preset,
+    };
+
+    let mut params = PresetParams::default();
+    if let Some(temperature) = flags.f32("temperature")? {
+        params.temperature_k = temperature;
+    }
+    if let Some(timestep) = flags.f32("timestep")? {
+        params.timestep_ps = timestep;
+    }
+
+    let mut stages = preset.build(&eff, &params);
+    if let Some(length) = flags.str("length") {
+        let ps = parse_time_ps(length)?;
+        for stage in &mut stages {
+            if matches!(stage.kind, StageKind::Produce | StageKind::Extend) {
+                stage.length = StageLength::Picoseconds(ps);
+            }
+        }
+    }
+    if flags.flag("no-trajectory") {
+        for stage in &mut stages {
+            stage.trajectory_target_frames = None;
+        }
+    }
+
+    // Apply tiered-parameter and raw-passthrough edits through the layered merge.
+    let edits = build_stage_edits(&flags)?;
+    let family = context.force_field_family;
+    let stages: Vec<MdStage> = stages
+        .into_iter()
+        .map(|stage| assemble(stage, family, &edits))
+        .collect();
+
+    // Validate before doing any work; errors block the run.
+    let issues = validate(&stages, &eff);
+    if has_errors(&issues) {
+        let errors: Vec<String> = issues
+            .iter()
+            .filter(|issue| {
+                issue.severity == crate::workflows::molecular_dynamics::run::IssueSeverity::Error
+            })
+            .map(|issue| issue.message.clone())
+            .collect();
+        bail!("cannot run `{}`: {}", preset.token(), errors.join("; "));
+    }
+
+    let mut specs = stage_specs_from_md_stages(&stages, family, None);
+
+    let task_run_id = create_cli_task_run(state, "run-md")?;
+    let work_dir = ensure_cli_task_run_dir(state, task_run_id)?;
+    state
+        .tasks
+        .set_engine_label(task_run_id, Some("GROMACS".to_string()));
+    sync_cli_task_manifest(state, task_run_id)?;
+    mark_cli_task_status(state, task_run_id, TaskStatus::Running)?;
+
+    let result = (|| {
+        let entry_id = state.entries.active_entry_id();
+        // Framework systems carry freeze/periodic hints applied to every stage.
+        let framework_meta = entry_id.and_then(|id| {
+            crate::frontend::md_support::load_framework_metadata_for_entry(state, id)
+        });
+        if let Some(meta) = &framework_meta {
+            for spec in &mut specs {
+                meta.apply_to(&mut spec.settings);
+            }
+        }
+
+        let topology = resolve_run_topology(state, entry_id)?;
+        let launch = resolve_launch(state)?;
+        let system = prepare_system(PrepareSystemRequest {
+            structure,
+            topology,
+            working_dir: work_dir.clone(),
+            freeze: framework_meta.as_ref().and_then(|m| m.freeze_selection()),
+        })?;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = run_pipeline(
+            system,
+            specs,
+            launch.clone(),
+            STAGE_TIMEOUT,
+            Arc::clone(&cancel),
+            |_| {},
+        )?;
+
+        let production = results
+            .last()
+            .ok_or_else(|| anyhow!("pipeline produced no stages"))?;
+        let trajectory = results
+            .iter()
+            .rev()
+            .find_map(|stage| stage.trajectory.clone());
+        let save_path = structure_io::default_structure_save_path(&production.structure, None);
+        let entry_id = state
+            .entries
+            .add_entry(production.structure.clone(), None, save_path);
+        activate_entry(state, entry_id);
+        let project_root = state
+            .workspace
+            .project()
+            .map(|project| project.root.clone());
+        let origin = super::dispatcher::md_run_origin(trajectory, project_root.as_deref());
+        state.entries.set_entry_origin(entry_id, origin);
+        record_cli_task_result_entry(state, task_run_id, entry_id)?;
+
+        let analysis_summary = run_analysis(&work_dir, &launch, production, cancel);
+        Ok(format!(
+            "molecular dynamics complete (preset {}, {} stages){analysis_summary}",
+            preset.token(),
+            results.len()
+        ))
+    })();
+
+    finish_cli_task(state, task_run_id, result)
+}
+
+/// Load the MD system context recorded by the active entry's build, or derive a
+/// minimal one from the active structure when no build recorded it (e.g. a
+/// directly-opened coordinate file). The minimal context classifies to the
+/// generic force-field family, so the run uses the legacy cut-off path.
+fn load_or_derive_context(state: &AppState) -> MdSystemContext {
+    if let Some(id) = state.entries.active_entry_id()
+        && let Some(context) = load_md_system_context_for_entry(state, id)
+    {
+        return context;
+    }
+    let structure = state.structure();
+    MdSystemContext::from_built(
+        structure,
+        "builtin",
+        None,
+        is_framework_shape(structure),
+        0.0,
+        false,
+        Vec::new(),
+    )
+}
+
+/// The topology source for a run: the GROMACS `topol.top` from the entry's build
+/// when present (the real force-field topology), else the captured engine-neutral
+/// topology rendered inline.
+fn resolve_run_topology(state: &AppState, entry_id: Option<u64>) -> Result<TopologySource> {
+    if let Some(id) = entry_id
+        && let Some(path) = gromacs_topology_path_for_entry(state, id)
+    {
+        return Ok(TopologySource::File(path));
+    }
+    let topology = load_active_or_derive_md_topology(state)?;
+    Ok(TopologySource::Inline(render_top(&topology)))
+}
+
+/// `--x` => `Some(true)`, `--no-x` => `Some(false)`, neither => `None`.
+fn tri_state_flag(flags: &Flags, name: &str) -> Option<bool> {
+    if flags.flag(name) {
+        Some(true)
+    } else if flags.flag(&format!("no-{name}")) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The system-type overrides expressed on the command line.
+fn parse_overrides(flags: &Flags) -> SystemTypeOverrides {
+    SystemTypeOverrides {
+        membrane: tri_state_flag(flags, "membrane"),
+        ligand: tri_state_flag(flags, "ligand"),
+        nucleic: tri_state_flag(flags, "nucleic"),
+    }
+}
+
+/// Build per-stage edits from `--set`/`--raw`.
+fn build_stage_edits(flags: &Flags) -> Result<StageEdits> {
+    let mut edits = StageEdits::default();
+    if let Some(set) = flags.str("set") {
+        parse_set_into(&mut edits.params, set)?;
+    }
+    if let Some(raw) = flags.str("raw") {
+        edits.raw_passthrough = parse_raw_lines(raw)?;
+    }
+    Ok(edits)
+}
+
+/// Parse `--set key=val,key=val` into tiered parameters (Standard/Advanced tiers).
+fn parse_set_into(params: &mut MdParameters, set: &str) -> Result<()> {
+    for pair in set.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--set entry `{pair}` must be key=value"))?;
+        let value = value.trim();
+        match key.trim() {
+            "coulomb_cutoff" => params.coulomb_cutoff_nm = Some(value.parse()?),
+            "vdw_cutoff" => params.vdw_cutoff_nm = Some(value.parse()?),
+            "thermostat_tau" => params.thermostat_tau_ps = Some(value.parse()?),
+            "pme_spacing" => params.pme_spacing_nm = Some(value.parse()?),
+            "pme_order" => params.pme_order = Some(value.parse()?),
+            "lincs_order" => params.constraint_order = Some(value.parse()?),
+            "lincs_iter" => params.constraint_iterations = Some(value.parse()?),
+            "nstlist" => params.neighbor_list_steps = Some(value.parse()?),
+            "seed" => params.random_seed = Some(value.parse()?),
+            other => bail!(
+                "unknown --set key `{other}` (try coulomb_cutoff, vdw_cutoff, thermostat_tau, \
+                 pme_spacing, pme_order, lincs_order, lincs_iter, nstlist, seed)"
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Parse `--raw "key=val;key2=val2"` into verbatim `.mdp` passthrough lines.
+fn parse_raw_lines(raw: &str) -> Result<Vec<(String, String)>> {
+    let mut lines = Vec::new();
+    for pair in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--raw entry `{pair}` must be key=value"))?;
+        lines.push((key.trim().to_string(), value.trim().to_string()));
+    }
+    Ok(lines)
+}
+
 /// Extract thermodynamic terms (Temperature, Potential) from the production
 /// energy file. Analysis failures are reported but do not fail the whole command
 /// (the trajectory is the primary deliverable).
@@ -590,5 +877,41 @@ mod tests {
         assert_eq!(parse_time_ps("200ns").unwrap(), 200_000.0);
         assert_eq!(parse_time_ps("500ps").unwrap(), 500.0);
         assert_eq!(parse_time_ps("250").unwrap(), 250.0);
+    }
+
+    #[test]
+    fn overrides_read_x_and_no_x_flags() {
+        let flags = Flags::parse(&args(&["--membrane", "--no-ligand"])).unwrap();
+        let overrides = parse_overrides(&flags);
+        assert_eq!(overrides.membrane, Some(true));
+        assert_eq!(overrides.ligand, Some(false));
+        // Unspecified axis stays None (trust detection).
+        assert_eq!(overrides.nucleic, None);
+    }
+
+    #[test]
+    fn parse_set_maps_keys_to_tiered_parameters() {
+        let mut params = MdParameters::default();
+        parse_set_into(&mut params, "coulomb_cutoff=1.1, pme_order=6 , seed=42").unwrap();
+        assert_eq!(params.coulomb_cutoff_nm, Some(1.1));
+        assert_eq!(params.pme_order, Some(6));
+        assert_eq!(params.random_seed, Some(42));
+        // An unknown key is a hard error, not silently dropped.
+        assert!(parse_set_into(&mut params, "bogus=1").is_err());
+        // A malformed entry is rejected.
+        assert!(parse_set_into(&mut params, "coulomb_cutoff").is_err());
+    }
+
+    #[test]
+    fn parse_raw_splits_semicolons_into_verbatim_pairs() {
+        let lines = parse_raw_lines("pull = yes ; nstcomm=100").unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                ("pull".to_string(), "yes".to_string()),
+                ("nstcomm".to_string(), "100".to_string()),
+            ]
+        );
+        assert!(parse_raw_lines("missing-equals").is_err());
     }
 }
