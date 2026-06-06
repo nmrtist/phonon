@@ -117,6 +117,15 @@ pub enum AppAction {
         index: usize,
         up: bool,
     },
+    /// Apply one inline/detail edit to the stage at `index`. The detail-view
+    /// widgets emit these; the dispatcher applies them in place so preset-filled
+    /// defaults stay the starting point and only the touched field changes.
+    EditMdRunStage {
+        index: usize,
+        edit: crate::frontend::state::MdStageEdit,
+    },
+    /// Open or close the detail view of the stage at the given index.
+    ToggleMdRunStageExpanded(usize),
     RefreshEngineRegistry,
     DetectEngineVersions,
     ApplyEngineOverride(crate::engines::registry::EngineId),

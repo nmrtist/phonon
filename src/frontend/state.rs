@@ -496,6 +496,56 @@ pub enum MdSystemAxis {
     Nucleic,
 }
 
+/// A single edit to one stage of a Run MD draft. Each variant targets one field
+/// of the neutral [`MdStage`](crate::workflows::molecular_dynamics::MdStage); the
+/// detail-view widgets emit these and the dispatcher applies them through
+/// [`MdRunPrompt::edit_stage`], keeping the dispatcher the sole mutator. The
+/// resolved stage realizes through the same adapter as the headless
+/// `md run --set/--raw` path, so the two stay one source of truth.
+#[derive(Debug, Clone)]
+pub enum MdStageEdit {
+    // --- Inline (Basic) fields, also reachable in the detail view ---
+    Temperature(f32),
+    /// Reference pressure (bar) for a pressure-coupled stage.
+    PressureBar(f32),
+    Length(crate::workflows::molecular_dynamics::StageLength),
+    // --- Detail-view structural fields ---
+    Timestep(f32),
+    Thermostat(Option<crate::workflows::molecular_dynamics::run::ThermostatKind>),
+    ThermostatTau(Option<f32>),
+    Barostat(crate::workflows::molecular_dynamics::run::BarostatKind),
+    BarostatTau(f32),
+    CouplingGroups(crate::workflows::molecular_dynamics::run::CouplingGroups),
+    Constraints(Option<crate::workflows::molecular_dynamics::run::ConstraintScope>),
+    /// Restraint force constant (kJ/mol/nm²); only meaningful on a restrained stage.
+    RestraintForceConstant(f32),
+    /// A single-ramp annealing schedule (start K, end K, duration ps).
+    Anneal {
+        start_k: f32,
+        end_k: f32,
+        duration_ps: f32,
+    },
+    // --- Detail-view tiered parameters (the `ParamId` table) ---
+    CoulombCutoff(Option<f32>),
+    VdwCutoff(Option<f32>),
+    PmeSpacing(Option<f32>),
+    PmeOrder(Option<u32>),
+    ConstraintOrder(Option<u32>),
+    ConstraintIterations(Option<u32>),
+    DispersionCorrection(Option<bool>),
+    RemoveComMotion(Option<bool>),
+    NeighborListSteps(Option<u32>),
+    RandomSeed(Option<i64>),
+    // --- Per-stage raw passthrough ---
+    AddRawLine,
+    SetRawLine {
+        line: usize,
+        key: String,
+        value: String,
+    },
+    RemoveRawLine(usize),
+}
+
 /// Recommendation-led draft for a Run MD launch. Holds the inherited build-time
 /// detection (`context`, read-only) strictly separate from the user's
 /// per-run corrections (`overrides`), so an override never writes back into the
@@ -522,6 +572,8 @@ pub struct MdRunPrompt {
     pub save_trajectory: bool,
     pub topology_override_path: Option<PathBuf>,
     pub show_advanced: bool,
+    /// Which stage's detail view is currently expanded (one at a time).
+    pub expanded_stage: Option<usize>,
 }
 
 impl Default for MdRunPrompt {
@@ -537,6 +589,7 @@ impl Default for MdRunPrompt {
             save_trajectory: true,
             topology_override_path: None,
             show_advanced: false,
+            expanded_stage: None,
         }
     }
 }
@@ -671,6 +724,81 @@ impl MdRunPrompt {
             self.stages.swap(index, index - 1);
         } else if !up && index + 1 < self.stages.len() {
             self.stages.swap(index, index + 1);
+        }
+    }
+
+    /// Toggle the detail view of the stage at `index` (only one open at a time).
+    pub fn toggle_stage_expanded(&mut self, index: usize) {
+        self.expanded_stage = if self.expanded_stage == Some(index) {
+            None
+        } else {
+            Some(index)
+        };
+    }
+
+    /// Apply one detail/inline edit to the stage at `index`. Mutates the stage in
+    /// place (preserving the rest of the sequence and any add/remove/reorder), so
+    /// preset-filled defaults remain the starting point and only the touched field
+    /// changes.
+    pub fn edit_stage(&mut self, index: usize, edit: MdStageEdit) {
+        use crate::workflows::molecular_dynamics::{AnnealSpec, RestraintScheme};
+        let Some(stage) = self.stages.get_mut(index) else {
+            return;
+        };
+        match edit {
+            MdStageEdit::Temperature(t) => stage.temperature_k = t,
+            MdStageEdit::PressureBar(p) => {
+                if let Some(pressure) = stage.pressure.as_mut() {
+                    pressure.ref_bar = p;
+                }
+            }
+            MdStageEdit::Length(length) => stage.length = length,
+            MdStageEdit::Timestep(dt) => stage.timestep_ps = dt,
+            MdStageEdit::Thermostat(kind) => stage.params.thermostat = kind,
+            MdStageEdit::ThermostatTau(tau) => stage.params.thermostat_tau_ps = tau,
+            MdStageEdit::Barostat(kind) => {
+                if let Some(pressure) = stage.pressure.as_mut() {
+                    pressure.barostat = kind;
+                }
+            }
+            MdStageEdit::BarostatTau(tau) => {
+                if let Some(pressure) = stage.pressure.as_mut() {
+                    pressure.tau_ps = tau;
+                }
+            }
+            MdStageEdit::CouplingGroups(groups) => stage.coupling_groups = groups,
+            MdStageEdit::Constraints(scope) => stage.params.constraints = scope,
+            MdStageEdit::RestraintForceConstant(fc) => {
+                if let RestraintScheme::Posres { fc_kj_mol_nm2, .. } = &mut stage.restraint {
+                    *fc_kj_mol_nm2 = fc;
+                }
+            }
+            MdStageEdit::Anneal {
+                start_k,
+                end_k,
+                duration_ps,
+            } => stage.anneal = Some(AnnealSpec::ramp(start_k, end_k, duration_ps)),
+            MdStageEdit::CoulombCutoff(v) => stage.params.coulomb_cutoff_nm = v,
+            MdStageEdit::VdwCutoff(v) => stage.params.vdw_cutoff_nm = v,
+            MdStageEdit::PmeSpacing(v) => stage.params.pme_spacing_nm = v,
+            MdStageEdit::PmeOrder(v) => stage.params.pme_order = v,
+            MdStageEdit::ConstraintOrder(v) => stage.params.constraint_order = v,
+            MdStageEdit::ConstraintIterations(v) => stage.params.constraint_iterations = v,
+            MdStageEdit::DispersionCorrection(v) => stage.params.dispersion_correction = v,
+            MdStageEdit::RemoveComMotion(v) => stage.params.remove_com_motion = v,
+            MdStageEdit::NeighborListSteps(v) => stage.params.neighbor_list_steps = v,
+            MdStageEdit::RandomSeed(v) => stage.params.random_seed = v,
+            MdStageEdit::AddRawLine => stage.raw_passthrough.push((String::new(), String::new())),
+            MdStageEdit::SetRawLine { line, key, value } => {
+                if let Some(slot) = stage.raw_passthrough.get_mut(line) {
+                    *slot = (key, value);
+                }
+            }
+            MdStageEdit::RemoveRawLine(line) => {
+                if line < stage.raw_passthrough.len() {
+                    stage.raw_passthrough.remove(line);
+                }
+            }
         }
     }
 }
@@ -1224,7 +1352,8 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use super::{AppState, MdRunPrompt, MdStageEdit};
+    use crate::workflows::molecular_dynamics::{MdStage, StageLength};
 
     #[test]
     fn empty_startup_does_not_create_initial_entry() {
@@ -1234,5 +1363,99 @@ mod tests {
         assert_eq!(state.entries.records.len(), 0);
         assert_eq!(state.entries.tabs.len(), 0);
         assert_eq!(state.current_entry_label(), "Scratch");
+    }
+
+    fn prompt_with_one_produce_stage() -> MdRunPrompt {
+        MdRunPrompt {
+            stages: vec![MdStage::produce(300.0)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn edit_stage_sets_and_reverts_tiered_parameter() {
+        let mut prompt = prompt_with_one_produce_stage();
+        // Setting and clearing an Advanced-tier parameter round-trips through the
+        // Option model (set -> Some, revert -> None).
+        prompt.edit_stage(0, MdStageEdit::PmeOrder(Some(6)));
+        assert_eq!(prompt.stages[0].params.pme_order, Some(6));
+        prompt.edit_stage(0, MdStageEdit::PmeOrder(None));
+        assert_eq!(prompt.stages[0].params.pme_order, None);
+    }
+
+    #[test]
+    fn edit_stage_inline_fields_mutate_in_place() {
+        let mut prompt = prompt_with_one_produce_stage();
+        prompt.edit_stage(0, MdStageEdit::Temperature(287.0));
+        prompt.edit_stage(0, MdStageEdit::Length(StageLength::Steps(1234)));
+        prompt.edit_stage(0, MdStageEdit::PressureBar(1.5));
+        assert_eq!(prompt.stages[0].temperature_k, 287.0);
+        assert_eq!(prompt.stages[0].length, StageLength::Steps(1234));
+        assert_eq!(prompt.stages[0].pressure.unwrap().ref_bar, 1.5);
+    }
+
+    #[test]
+    fn edit_stage_raw_lines_add_set_and_remove() {
+        let mut prompt = prompt_with_one_produce_stage();
+        prompt.edit_stage(0, MdStageEdit::AddRawLine);
+        assert_eq!(prompt.stages[0].raw_passthrough.len(), 1);
+        prompt.edit_stage(
+            0,
+            MdStageEdit::SetRawLine {
+                line: 0,
+                key: "nstcomm".to_string(),
+                value: "50".to_string(),
+            },
+        );
+        assert_eq!(
+            prompt.stages[0].raw_passthrough[0],
+            ("nstcomm".to_string(), "50".to_string())
+        );
+        prompt.edit_stage(0, MdStageEdit::RemoveRawLine(0));
+        assert!(prompt.stages[0].raw_passthrough.is_empty());
+    }
+
+    #[test]
+    fn edit_stage_ignores_out_of_range_index() {
+        let mut prompt = prompt_with_one_produce_stage();
+        // Must not panic on a stale index (e.g. a removed stage).
+        prompt.edit_stage(9, MdStageEdit::Temperature(123.0));
+        assert_eq!(prompt.stages[0].temperature_k, 300.0);
+    }
+
+    #[test]
+    fn toggle_stage_expanded_opens_one_at_a_time() {
+        let mut prompt = prompt_with_one_produce_stage();
+        assert_eq!(prompt.expanded_stage, None);
+        prompt.toggle_stage_expanded(0);
+        assert_eq!(prompt.expanded_stage, Some(0));
+        prompt.toggle_stage_expanded(0);
+        assert_eq!(prompt.expanded_stage, None);
+    }
+
+    #[test]
+    fn inline_and_detail_edits_reach_the_realized_mdp() {
+        use crate::engines::gromacs::input::render_mdp;
+        use crate::engines::gromacs::stage_specs_from_md_stages;
+        use crate::workflows::molecular_dynamics::ForceFieldFamily;
+
+        // The merge of an inline (temperature) and a detail (PME order) edit must
+        // resolve into the realized stage exactly as the run will see it.
+        let mut prompt = prompt_with_one_produce_stage();
+        prompt.edit_stage(0, MdStageEdit::Temperature(310.0));
+        prompt.edit_stage(0, MdStageEdit::PmeOrder(Some(6)));
+
+        let specs = stage_specs_from_md_stages(&prompt.stages, ForceFieldFamily::Amber, None);
+        let mdp = render_mdp(&specs[0].settings);
+        assert!(
+            mdp.lines()
+                .any(|line| line.starts_with("ref-t") && line.trim_end().ends_with("= 310")),
+            "edited temperature should reach ref-t:\n{mdp}"
+        );
+        assert!(
+            mdp.lines()
+                .any(|line| line.starts_with("pme-order") && line.trim_end().ends_with("= 6")),
+            "edited PME order should reach the mdp:\n{mdp}"
+        );
     }
 }

@@ -567,4 +567,25 @@ mod tests {
         // Every slot is enumerated exactly once.
         assert_eq!(MdParameters::tiers().len(), 13);
     }
+
+    #[test]
+    fn descriptor_table_drives_the_inline_detail_split() {
+        // The GUI partitions the detail view straight off this table: nothing in
+        // `MdParameters` is Basic (the Basic/inline set — temperature, pressure,
+        // length, timestep — is first-class on `MdStage`), so every table entry
+        // falls into the Standard (shown) or Advanced (collapsed) detail tier.
+        let count = |tier: ParamTier| {
+            MdParameters::tiers()
+                .iter()
+                .filter(|pid| pid.tier() == tier)
+                .count()
+        };
+        assert_eq!(count(ParamTier::Basic), 0);
+        assert_eq!(count(ParamTier::Standard), 5);
+        assert_eq!(count(ParamTier::Advanced), 8);
+        assert_eq!(
+            count(ParamTier::Basic) + count(ParamTier::Standard) + count(ParamTier::Advanced),
+            MdParameters::tiers().len()
+        );
+    }
 }

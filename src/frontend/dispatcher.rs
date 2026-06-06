@@ -153,6 +153,12 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::MoveMdRunStage { index, up } => {
             with_md_run_prompt(state, |prompt| prompt.move_stage(index, up))
         }
+        AppAction::EditMdRunStage { index, edit } => {
+            with_md_run_prompt(state, |prompt| prompt.edit_stage(index, edit))
+        }
+        AppAction::ToggleMdRunStageExpanded(index) => {
+            with_md_run_prompt(state, |prompt| prompt.toggle_stage_expanded(index))
+        }
         AppAction::RefreshEngineRegistry => reprobe_engines(state),
         AppAction::DetectEngineVersions => detect_engine_versions(state),
         AppAction::ApplyEngineOverride(id) => apply_engine_override(state, id),
