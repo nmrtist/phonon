@@ -217,6 +217,14 @@ pub fn prepare_system(request: PrepareSystemRequest) -> Result<PreparedSystem> {
         .topology
         .materialize(&request.working_dir, "topol.top")?;
 
+    // A file topology reused from a build directory may `#include` sibling `.itp`
+    // files (e.g. the `posre.itp` position restraints pdb2gmx writes). Copy them
+    // alongside so grompp resolves the includes when the run directory differs
+    // from the build directory.
+    if let TopologySource::File(source) = &request.topology {
+        copy_topology_includes(source, &request.working_dir)?;
+    }
+
     let index_file = match &request.freeze {
         Some(freeze) => {
             let path = request.working_dir.join("index.ndx");
@@ -237,6 +245,32 @@ pub fn prepare_system(request: PrepareSystemRequest) -> Result<PreparedSystem> {
         index_file,
         original_structure: request.structure,
     })
+}
+
+/// Copy the `.itp` files sitting beside a file topology into the run directory,
+/// so `#include` directives (such as `posre.itp` for position restraints) resolve
+/// when the run directory differs from the topology's source directory. A no-op
+/// when they are the same directory; best-effort if the source dir can't be read.
+fn copy_topology_includes(topology_source: &Path, target_dir: &Path) -> Result<()> {
+    let Some(source_dir) = topology_source.parent() else {
+        return Ok(());
+    };
+    if source_dir == target_dir {
+        return Ok(());
+    }
+    let Ok(entries) = fs::read_dir(source_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("itp")
+            && let Some(name) = path.file_name()
+        {
+            fs::copy(&path, target_dir.join(name))
+                .with_context(|| format!("copying topology include {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Render a GROMACS index file (`.ndx`) with a `System` group covering every
@@ -305,6 +339,16 @@ where
         .index_file
         .as_ref()
         .map(|p| file_name_or(p, "index.ndx"));
+    // When this stage applies position restraints (`-DPOSRES`), GROMACS >= 2018
+    // requires the restraint *reference* coordinates via `grompp -r`. Per the
+    // GROMACS guidance, reuse the same file given to `-c`. Omitted otherwise, so
+    // an unrestrained (or framework/argon) stage's argument list is unchanged.
+    let restraint_ref = request
+        .settings
+        .define
+        .as_deref()
+        .filter(|define| define.contains("POSRES"))
+        .map(|_| coord_name.as_str());
 
     let remaining = remaining_budget(request.max_duration, started_at)?;
     report(GromacsProgress::Stage(format!(
@@ -317,6 +361,7 @@ where
                 &mdp_name,
                 &coord_name,
                 checkpoint_name.as_deref(),
+                restraint_ref,
                 &topology_file_name,
                 &tpr_name,
                 index_name.as_deref(),
@@ -450,6 +495,7 @@ pub(crate) fn build_grompp_args(
     mdp: &str,
     coordinates: &str,
     checkpoint: Option<&str>,
+    restraint_ref: Option<&str>,
     topology: &str,
     tpr: &str,
     index: Option<&str>,
@@ -461,6 +507,11 @@ pub(crate) fn build_grompp_args(
         "-c".to_string(),
         coordinates.to_string(),
     ];
+    if let Some(restraint_ref) = restraint_ref {
+        // Position-restraint reference coordinates (`-DPOSRES` stages only).
+        args.push("-r".to_string());
+        args.push(restraint_ref.to_string());
+    }
     if let Some(checkpoint) = checkpoint {
         args.push("-t".to_string());
         args.push(checkpoint.to_string());
@@ -767,8 +818,16 @@ AR  8
 
     #[test]
     fn grompp_args_for_single_stage_match_legacy_form() {
-        // No checkpoint -> the exact minimization argument list.
-        let args = build_grompp_args("em.mdp", "conf.gro", None, "topol.top", "em.tpr", None);
+        // No checkpoint and no restraints -> the exact minimization argument list.
+        let args = build_grompp_args(
+            "em.mdp",
+            "conf.gro",
+            None,
+            None,
+            "topol.top",
+            "em.tpr",
+            None,
+        );
         let expected: Vec<String> = [
             "grompp",
             "-f",
@@ -794,6 +853,7 @@ AR  8
             "npt.mdp",
             "nvt_out.gro",
             Some("nvt.cpt"),
+            None,
             "topol.top",
             "npt.tpr",
             None,
@@ -802,6 +862,26 @@ AR  8
         assert!(joined.contains("-t nvt.cpt"), "missing -t: {joined}");
         // -c precedes -t, and -p/-o/-maxwarn trail.
         assert!(joined.contains("-c nvt_out.gro -t nvt.cpt -p topol.top"));
+    }
+
+    #[test]
+    fn grompp_args_include_restraint_reference_when_restrained() {
+        // A restrained stage passes the restraint reference coordinates via `-r`
+        // (required by GROMACS >= 2018); reusing the `-c` file is the documented
+        // approach.
+        let args = build_grompp_args(
+            "nvt.mdp",
+            "em_out.gro",
+            None,
+            Some("em_out.gro"),
+            "topol.top",
+            "nvt.tpr",
+            None,
+        );
+        assert!(
+            args.join(" ").contains("-c em_out.gro -r em_out.gro"),
+            "missing -r: {args:?}"
+        );
     }
 
     #[test]
@@ -827,6 +907,7 @@ AR  8
         let args = build_grompp_args(
             "em.mdp",
             "conf.gro",
+            None,
             None,
             "topol.top",
             "em.tpr",

@@ -12,6 +12,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::domain::Structure;
+use crate::engines::gromacs::nonbonded::{NonbondedScheme, force_field_block};
 
 /// Conversion factor angstroms -> nanometers (GROMACS uses nm).
 const ANGSTROM_TO_NM: f32 = 0.1;
@@ -73,6 +74,54 @@ impl ConstraintAlgorithm {
     }
 }
 
+/// Thermostat algorithm (`tcoupl =`), rendered only when temperature coupling is
+/// active. Defaults to velocity rescaling, the robust standard choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thermostat {
+    VRescale,
+    NoseHoover,
+    /// Weak coupling — equilibration only.
+    Berendsen,
+}
+
+impl Thermostat {
+    pub fn mdp_token(self) -> &'static str {
+        match self {
+            Self::VRescale => "V-rescale",
+            Self::NoseHoover => "Nose-Hoover",
+            Self::Berendsen => "Berendsen",
+        }
+    }
+}
+
+/// Barostat algorithm (`pcoupl =`). Stochastic cell rescaling is the modern
+/// default and needs GROMACS >= 2021; older engines fall back to the
+/// Berendsen-equilibration / Parrinello-Rahman-production pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Barostat {
+    CRescale,
+    ParrinelloRahman,
+    /// Weak coupling — equilibration only.
+    Berendsen,
+}
+
+impl Barostat {
+    pub fn mdp_token(self) -> &'static str {
+        match self {
+            Self::CRescale => "C-rescale",
+            Self::ParrinelloRahman => "Parrinello-Rahman",
+            Self::Berendsen => "Berendsen",
+        }
+    }
+}
+
+/// A simulated-annealing temperature ramp applied to every coupling group:
+/// `(time_ps, temperature_k)` control points.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Annealing {
+    pub points: Vec<(f32, f32)>,
+}
+
 /// Temperature-coupling configuration. `tc_grps`, `tau_t` and `ref_t` are
 /// parallel: one entry per coupling group. The thermostat is velocity-rescaling
 /// (`V-rescale`), the standard robust choice.
@@ -96,24 +145,39 @@ impl TemperatureCoupling {
     }
 }
 
-/// Pressure-coupling configuration. The barostat is stochastic cell rescaling
-/// (`C-rescale`).
+/// Pressure-coupling configuration. `ref_p`/`compressibility` are parallel
+/// vectors: one entry for isotropic, two for semi-isotropic (xy, z), more for
+/// anisotropic.
 #[derive(Debug, Clone)]
 pub struct PressureCoupling {
+    pub barostat: Barostat,
     pub pcoupltype: String,
     pub tau_p: f32,
-    pub ref_p: f32,
-    pub compressibility: f32,
+    pub ref_p: Vec<f32>,
+    pub compressibility: Vec<f32>,
 }
 
 impl PressureCoupling {
-    /// Isotropic coupling to 1 bar — the standard NPT/production setting.
+    /// Isotropic coupling to 1 bar with the modern stochastic cell-rescale
+    /// barostat — the standard NPT/production setting.
     pub fn isotropic() -> Self {
         Self {
+            barostat: Barostat::CRescale,
             pcoupltype: "isotropic".to_string(),
             tau_p: 2.0,
-            ref_p: 1.0,
-            compressibility: 4.5e-5,
+            ref_p: vec![1.0],
+            compressibility: vec![4.5e-5],
+        }
+    }
+
+    /// Semi-isotropic coupling to 1 bar (membrane systems: in-plane xy and
+    /// normal z couple independently).
+    pub fn semi_isotropic() -> Self {
+        Self {
+            pcoupltype: "semiisotropic".to_string(),
+            ref_p: vec![1.0, 1.0],
+            compressibility: vec![4.5e-5, 4.5e-5],
+            ..Self::isotropic()
         }
     }
 }
@@ -202,6 +266,21 @@ pub struct MdpSettings {
     /// rigid framework fixed while the surrounding system evolves. The named
     /// group must exist in the index file passed to grompp.
     pub freeze: Option<FreezeGroup>,
+    /// Electrostatics/vdW treatment. Defaults to the legacy plain cut-off (whose
+    /// rendered block is byte-stable); a biomolecular run sets PME plus the
+    /// force-field nonbonded block.
+    pub nonbonded: NonbondedScheme,
+    /// `define =` preprocessor flags (e.g. `-DPOSRES` to switch on position
+    /// restraints). `None` emits no `define` line.
+    pub define: Option<String>,
+    /// Thermostat algorithm; rendered only when `temperature_coupling` is set.
+    pub thermostat: Thermostat,
+    /// Simulated-annealing ramp; `None` emits no annealing block.
+    pub annealing: Option<Annealing>,
+    /// Raw `key = value` lines appended verbatim last (engine passthrough). May
+    /// introduce any directive — including ones with no dedicated field — and,
+    /// being last, overrides earlier ones.
+    pub raw_lines: Vec<(String, String)>,
 }
 
 /// A set of atoms frozen in place during a run. Only full (3D) freezing is
@@ -232,6 +311,11 @@ impl MdpSettings {
             constraint_algorithm: ConstraintAlgorithm::Lincs,
             periodic_molecules: false,
             freeze: None,
+            nonbonded: NonbondedScheme::Cutoff,
+            define: None,
+            thermostat: Thermostat::VRescale,
+            annealing: None,
+            raw_lines: Vec::new(),
         }
     }
 
@@ -337,6 +421,12 @@ pub fn to_gro(structure: &Structure, title: &str) -> Result<String> {
 pub fn render_mdp(settings: &MdpSettings) -> String {
     let mut body = String::new();
     body.push_str("; Phonon-generated GROMACS run parameters\n");
+    if let Some(define) = &settings.define {
+        // Preprocessor flags such as `-DPOSRES`, which switch on the position
+        // restraints whose `#ifdef POSRES` block lives in the topology's
+        // posre.itp. Omitted entirely when unset (production drops restraints).
+        body.push_str(&format!("define                   = {define}\n"));
+    }
 
     body.push_str(&format!(
         "integrator               = {}\n",
@@ -360,18 +450,32 @@ pub fn render_mdp(settings: &MdpSettings) -> String {
         ));
     }
 
-    body.push_str("nstlist                  = 10\n");
-    body.push_str("cutoff-scheme            = Verlet\n");
-    body.push_str("ns_type                  = grid\n");
-    body.push_str("coulombtype              = cutoff\n");
-    body.push_str(&format!(
-        "rcoulomb                 = {:.4}\n",
-        settings.coulomb_cutoff_nm
-    ));
-    body.push_str(&format!(
-        "rvdw                     = {:.4}\n",
-        settings.vdw_cutoff_nm
-    ));
+    match settings.nonbonded {
+        // Legacy plain cut-off (homogeneous LJ / framework). Kept byte-for-byte
+        // identical to the historical output — a stability test depends on it.
+        NonbondedScheme::Cutoff => {
+            body.push_str("nstlist                  = 10\n");
+            body.push_str("cutoff-scheme            = Verlet\n");
+            body.push_str("ns_type                  = grid\n");
+            body.push_str("coulombtype              = cutoff\n");
+            body.push_str(&format!(
+                "rcoulomb                 = {:.4}\n",
+                settings.coulomb_cutoff_nm
+            ));
+            body.push_str(&format!(
+                "rvdw                     = {:.4}\n",
+                settings.vdw_cutoff_nm
+            ));
+        }
+        // PME + the force field's nonbonded block (biomolecular systems).
+        NonbondedScheme::ForceField(family) => {
+            body.push_str(&force_field_block(
+                family,
+                settings.coulomb_cutoff_nm,
+                settings.vdw_cutoff_nm,
+            ));
+        }
+    }
     body.push_str("pbc                      = xyz\n");
     if settings.periodic_molecules {
         // Required when a molecule is bonded across the periodic boundary (a
@@ -403,6 +507,12 @@ pub fn render_mdp(settings: &MdpSettings) -> String {
         render_md_coupling(&mut body, settings);
     }
 
+    // Raw passthrough, appended verbatim last so it can override anything above
+    // (and introduce keys with no dedicated field).
+    for (key, value) in &settings.raw_lines {
+        body.push_str(&format!("{key:<25}= {value}\n"));
+    }
+
     body
 }
 
@@ -410,7 +520,10 @@ pub fn render_mdp(settings: &MdpSettings) -> String {
 /// directives. Split out to keep [`render_mdp`] readable.
 fn render_md_coupling(body: &mut String, settings: &MdpSettings) {
     if let Some(tc) = &settings.temperature_coupling {
-        body.push_str("tcoupl                   = V-rescale\n");
+        body.push_str(&format!(
+            "tcoupl                   = {}\n",
+            settings.thermostat.mdp_token()
+        ));
         body.push_str(&format!(
             "tc-grps                  = {}\n",
             tc.tc_grps.join(" ")
@@ -426,13 +539,19 @@ fn render_md_coupling(body: &mut String, settings: &MdpSettings) {
     }
 
     if let Some(pc) = &settings.pressure_coupling {
-        body.push_str("pcoupl                   = C-rescale\n");
+        body.push_str(&format!(
+            "pcoupl                   = {}\n",
+            pc.barostat.mdp_token()
+        ));
         body.push_str(&format!("pcoupltype               = {}\n", pc.pcoupltype));
         body.push_str(&format!("tau-p                    = {}\n", pc.tau_p));
-        body.push_str(&format!("ref-p                    = {}\n", pc.ref_p));
+        body.push_str(&format!(
+            "ref-p                    = {}\n",
+            join_floats(&pc.ref_p)
+        ));
         body.push_str(&format!(
             "compressibility          = {}\n",
-            pc.compressibility
+            join_floats(&pc.compressibility)
         ));
     } else {
         body.push_str("pcoupl                   = no\n");
@@ -461,6 +580,38 @@ fn render_md_coupling(body: &mut String, settings: &MdpSettings) {
             out.nstxout_compressed
         ));
     }
+
+    if let Some(annealing) = &settings.annealing {
+        render_annealing(body, settings, annealing);
+    }
+}
+
+/// Append a simulated-annealing block. GROMACS expects one entry per temperature
+/// coupling group; the same ramp is applied to every group, with each group's
+/// control points concatenated in `annealing-time`/`annealing-temp`.
+fn render_annealing(body: &mut String, settings: &MdpSettings, annealing: &Annealing) {
+    let groups = settings
+        .temperature_coupling
+        .as_ref()
+        .map_or(1, |tc| tc.tc_grps.len())
+        .max(1);
+    let npoints = annealing.points.len();
+    let times: Vec<String> = (0..groups)
+        .flat_map(|_| annealing.points.iter().map(|(time, _)| time.to_string()))
+        .collect();
+    let temps: Vec<String> = (0..groups)
+        .flat_map(|_| annealing.points.iter().map(|(_, temp)| temp.to_string()))
+        .collect();
+    body.push_str(&format!(
+        "annealing                = {}\n",
+        vec!["single"; groups].join(" ")
+    ));
+    body.push_str(&format!(
+        "annealing-npoints        = {}\n",
+        vec![npoints.to_string(); groups].join(" ")
+    ));
+    body.push_str(&format!("annealing-time           = {}\n", times.join(" ")));
+    body.push_str(&format!("annealing-temp           = {}\n", temps.join(" ")));
 }
 
 /// Render a list of floats space-separated using their compact `Display` form
