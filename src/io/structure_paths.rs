@@ -136,9 +136,9 @@ mod tests {
     fn keeps_writable_source_extension_as_default_structure_save_path() {
         let structure = Structure::with_bonds("structure", Vec::new(), Vec::new());
         let save_path =
-            default_structure_save_path(&structure, Some(Path::new("C:\\tmp\\structure.pdb")));
+            default_structure_save_path(&structure, Some(Path::new("tmp/structure.pdb")));
 
-        assert_eq!(save_path, PathBuf::from("C:\\tmp\\structure.pdb"));
+        assert_eq!(save_path, PathBuf::from("tmp/structure.pdb"));
     }
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
             UnitCell::from_parameters(10.0, 10.0, 10.0, 90.0, 90.0, 90.0),
         );
         let save_path =
-            default_structure_save_path(&structure, Some(Path::new("C:\\tmp\\cell.gro")));
+            default_structure_save_path(&structure, Some(Path::new("tmp/cell.gro")));
 
         assert_eq!(save_path, PathBuf::from("cell.cif"));
     }
@@ -161,9 +161,9 @@ mod tests {
     #[test]
     fn path_with_format_extension_replaces_mismatched_suffix() {
         let output =
-            path_with_format_extension(Path::new("C:\\tmp\\example.xyz"), StructureFormat::Pdb);
+            path_with_format_extension(Path::new("tmp/example.xyz"), StructureFormat::Pdb);
 
-        assert_eq!(output, PathBuf::from("C:\\tmp\\example.pdb"));
+        assert_eq!(output, PathBuf::from("tmp/example.pdb"));
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
         let structure = Structure::with_bonds("structure", Vec::new(), Vec::new());
 
         assert_eq!(
-            preferred_save_format(&structure, Some(Path::new("C:\\tmp\\structure.mol2"))),
+            preferred_save_format(&structure, Some(Path::new("tmp/structure.mol2"))),
             StructureFormat::Mol2
         );
     }
