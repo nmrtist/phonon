@@ -276,4 +276,15 @@ impl eframe::App for PhononApp {
             [0.0, 0.0, 0.0, 0.0]
         }
     }
+
+    /// Persist only the window geometry, not egui's transient widget memory.
+    ///
+    /// The `eframe` "persistence" feature (enabled for window size/position recall)
+    /// otherwise also serializes the entire egui `Memory` typemap — collapsing-header
+    /// open/closed state, scroll offsets, text-edit undo buffers, focus, etc. — which
+    /// we don't want surviving restarts. Window geometry is saved separately (gated on
+    /// `persist_window`, default true), so it is unaffected by returning false here.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
 }
