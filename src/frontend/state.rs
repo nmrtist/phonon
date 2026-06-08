@@ -35,8 +35,8 @@ impl PrimaryView {
     pub fn icon(self) -> &'static str {
         match self {
             Self::EntryList => egui_phosphor::regular::LIST,
-            Self::Tasks => egui_phosphor::regular::ROCKET_LAUNCH,
-            Self::Settings => egui_phosphor::regular::GEAR,
+            Self::Tasks => egui_phosphor::regular::LIGHTNING,
+            Self::Settings => egui_phosphor::regular::SLIDERS_HORIZONTAL,
         }
     }
 
