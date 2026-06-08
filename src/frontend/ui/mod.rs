@@ -78,6 +78,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
 
     egui::Panel::left("activity_bar")
         .exact_size(52.0)
+        .resizable(false)
         .frame(
             Frame::default()
                 .fill(pal.activity_bar)
@@ -85,42 +86,69 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         )
         .show_inside(ui, |ui| render_activity_bar(state, ui));
 
-    // Sidebars use egui's built-in resizable panels: unlike a custom overlay
-    // handle, the native resize takes priority over the panel's own scroll bar
-    // at the shared edge (egui runs the resize interaction on top of the
-    // contents), so dragging the divider always resizes instead of catching the
-    // scroll bar. The harsh near-white hover line is softened in `theme.rs`.
+    // Sidebars are fixed-width panels driven by our own proximity-revealed
+    // resize dividers (wired after the central panel; see `render_resize_divider`).
+    // egui's native resize is off (`resizable(false)`) so it never paints the
+    // harsh full-height hover line, and `show_separator_line(false)` hands the
+    // at-rest hairline to our overlay too. `exact_size` also dodges egui's
+    // resizable-panel growth bug (the same reason the bottom panel uses it).
+    // Transient per-frame rendered widths. egui's `Panel::exact_size` is a *floor*,
+    // not a cap: content with a larger min-width (the Settings sliders/combos) grows
+    // the panel past the requested width. We keep `*_sidebar_width` as the user's
+    // drag-chosen value — so switching to a view with narrower content lets the
+    // sidebar shrink back instead of ratcheting up to the widest view ever shown —
+    // but draw the resize divider and lay out the central column at the panel's
+    // *actual* rendered edge so they stay flush at any width. Seed them with the
+    // stored width so that if a panel is toggled on mid-frame (e.g. the bottom
+    // panel's "Open Tasks" button, which runs after this block) the divider falls
+    // back to a sane position for that one frame rather than the activity-bar edge.
+    let mut primary_rendered_w = state.ui.layout.primary_sidebar_width;
+    let mut secondary_rendered_w = state.ui.layout.secondary_sidebar_width;
+
     if state.ui.layout.show_primary_sidebar {
-        egui::Panel::left("primary_sidebar")
-            .default_size(state.ui.layout.primary_sidebar_width)
-            .min_size(220.0)
-            .resizable(true)
+        let max_w = sidebar_max_width(ctx.viewport_rect().width());
+        let width = state
+            .ui
+            .layout
+            .primary_sidebar_width
+            .clamp(SIDEBAR_MIN_WIDTH_PRIMARY, max_w);
+        state.ui.layout.primary_sidebar_width = width;
+        let r = egui::Panel::left("primary_sidebar")
+            .resizable(false)
+            .exact_size(width)
+            .show_separator_line(false)
             .frame(
                 Frame::default()
                     .fill(pal.sidebar)
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
-                state.ui.layout.primary_sidebar_width = ui.available_width();
-                ui.set_max_width(ui.available_width());
                 render_primary_sidebar(state, ui, actions);
             });
+        primary_rendered_w = r.response.rect.width();
     }
 
     if state.ui.layout.show_secondary_sidebar {
-        egui::Panel::right("secondary_sidebar")
-            .default_size(state.ui.layout.secondary_sidebar_width)
-            .min_size(240.0)
-            .resizable(true)
+        let max_w = sidebar_max_width(ctx.viewport_rect().width());
+        let width = state
+            .ui
+            .layout
+            .secondary_sidebar_width
+            .clamp(SIDEBAR_MIN_WIDTH_SECONDARY, max_w);
+        state.ui.layout.secondary_sidebar_width = width;
+        let r = egui::Panel::right("secondary_sidebar")
+            .resizable(false)
+            .exact_size(width)
+            .show_separator_line(false)
             .frame(
                 Frame::default()
                     .fill(pal.sidebar)
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
-                state.ui.layout.secondary_sidebar_width = ui.available_width();
                 render_secondary_sidebar(state, ui, actions);
             });
+        secondary_rendered_w = r.response.rect.width();
     }
 
     egui::CentralPanel::default()
@@ -139,16 +167,18 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
     if state.ui.layout.show_panel {
         let viewport_rect = ctx.viewport_rect();
         let content_bottom = viewport_rect.bottom() - 24.0; // above the status bar
+        // Use the panels' *rendered* widths (see the note above the sidebar panels)
+        // so the bottom-panel divider stays flush with the central column.
         let workspace_left = viewport_rect.left()
             + 52.0
             + if state.ui.layout.show_primary_sidebar {
-                state.ui.layout.primary_sidebar_width
+                primary_rendered_w
             } else {
                 0.0
             };
         let workspace_right = viewport_rect.right()
             - if state.ui.layout.show_secondary_sidebar {
-                state.ui.layout.secondary_sidebar_width
+                secondary_rendered_w
             } else {
                 0.0
             };
@@ -158,17 +188,76 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             &ctx,
             "bottom_panel_resize",
             DividerKind::Horizontal,
+            // Inset the grab strip past the sidebar dividers (which now run full
+            // height at workspace_left / workspace_right) so the bottom corners
+            // aren't an ambiguous two-axis drag target.
             Rect::from_min_max(
-                egui::pos2(workspace_left + 10.0, y - 4.0),
-                egui::pos2(workspace_right - 10.0, y + 4.0),
+                egui::pos2(workspace_left + DIVIDER_GRAB_HALF_WIDTH, y - 4.0),
+                egui::pos2(workspace_right - DIVIDER_GRAB_HALF_WIDTH, y + 4.0),
             ),
             y,
             &mut state.ui.layout.panel_height,
             -1.0,
             120.0,
             max_panel_height,
+            180.0,
             &pal,
         );
+    }
+
+    // Sidebar resize dividers — proximity-revealed, matching the bottom panel.
+    // Drawn over the central panel so the soft bar floats on the shared edge;
+    // the panels themselves are fixed-width (see above).
+    {
+        let vp = ctx.viewport_rect();
+        let content_top = vp.top() + 32.0; // below the title bar
+        let content_bottom = vp.bottom() - 24.0; // above the status bar
+        // The sidebar spans the full content height — the bottom panel is nested
+        // inside the central column (to the right of the sidebar), not under it —
+        // so its resize divider runs the whole way down to the status bar rather
+        // than stopping at the bottom panel's top edge.
+        let divider_bottom = content_bottom;
+        let max_w = sidebar_max_width(vp.width());
+        if state.ui.layout.show_primary_sidebar {
+            // Draw the divider at the panel's rendered edge (see the note above the
+            // sidebar panels); drag still adjusts the user-chosen `primary_sidebar_width`.
+            let line_x = vp.left() + 52.0 + primary_rendered_w;
+            render_resize_divider(
+                &ctx,
+                "primary_sidebar_resize",
+                DividerKind::Vertical,
+                Rect::from_min_max(
+                    egui::pos2(line_x - DIVIDER_GRAB_HALF_WIDTH, content_top),
+                    egui::pos2(line_x + DIVIDER_GRAB_HALF_WIDTH, divider_bottom),
+                ),
+                line_x,
+                &mut state.ui.layout.primary_sidebar_width,
+                1.0,
+                SIDEBAR_MIN_WIDTH_PRIMARY,
+                max_w,
+                SIDEBAR_DEFAULT_WIDTH_PRIMARY,
+                &pal,
+            );
+        }
+        if state.ui.layout.show_secondary_sidebar {
+            let line_x = vp.right() - secondary_rendered_w;
+            render_resize_divider(
+                &ctx,
+                "secondary_sidebar_resize",
+                DividerKind::Vertical,
+                Rect::from_min_max(
+                    egui::pos2(line_x - DIVIDER_GRAB_HALF_WIDTH, content_top),
+                    egui::pos2(line_x + DIVIDER_GRAB_HALF_WIDTH, divider_bottom),
+                ),
+                line_x,
+                &mut state.ui.layout.secondary_sidebar_width,
+                -1.0,
+                SIDEBAR_MIN_WIDTH_SECONDARY,
+                max_w,
+                SIDEBAR_DEFAULT_WIDTH_SECONDARY,
+                &pal,
+            );
+        }
     }
 
     // Hairline border hugging the rounded window. Painted last so it sits atop
@@ -333,24 +422,54 @@ fn render_resize_handle(ctx: &egui::Context, spec: ResizeHandleSpec) {
 
 /// Whether a resize divider runs vertically (between side-by-side panels, drags
 /// horizontally) or horizontally (between stacked panels, drags vertically).
-/// `Vertical` is currently unused (sidebars use egui's native resize) but kept
-/// so the helper stays general.
 #[derive(Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 enum DividerKind {
     Vertical,
     Horizontal,
 }
 
-/// Interactive resize handle for a panel divider. `hit_rect` is the slim
-/// interactive strip — biased to the *central* side of the divider so it never
-/// overlaps the panel's scroll bar (which would otherwise steal the drag).
-/// `divider` is the on-screen position of the divider line (x for a vertical
-/// divider, y for a horizontal one) where the pill is drawn. While hovered or
-/// dragged it shows a subtle pill (hidden otherwise) and adjusts `value` (a
-/// panel width or height) by the drag along the divider's axis. `sign` flips
-/// the direction (`-1.0` for a right/bottom panel whose size grows as the
-/// divider moves toward it).
+/// Proximity-reveal tuning for the resize dividers (sidebars + bottom panel).
+/// How near the pointer must come (in points) before the bar begins to fade in.
+const DIVIDER_PROXIMITY_RADIUS: f32 = 24.0;
+/// Half-width of the slim interactive grab strip centered on the divider line.
+const DIVIDER_GRAB_HALF_WIDTH: f32 = 4.0;
+/// Fade in/out duration for the indicator bar.
+const DIVIDER_FADE_SECONDS: f32 = 0.15;
+/// Alpha of the always-visible at-rest separator hairline (subtle light gray, so
+/// the sidebar keeps a clear edge and doesn't read as detached from the content).
+const DIVIDER_REST_ALPHA: u8 = 180;
+/// Alpha of the bar when revealed on approach.
+const DIVIDER_ACTIVE_ALPHA: u8 = 220;
+/// Width of the fully-revealed bar (it thins to 1 px at rest).
+const DIVIDER_BAR_WIDTH: f32 = 2.0;
+
+const SIDEBAR_MIN_WIDTH_PRIMARY: f32 = 220.0;
+const SIDEBAR_MIN_WIDTH_SECONDARY: f32 = 240.0;
+const SIDEBAR_DEFAULT_WIDTH_PRIMARY: f32 = 240.0;
+const SIDEBAR_DEFAULT_WIDTH_SECONDARY: f32 = 320.0;
+
+/// Largest a sidebar may be dragged: half the window, capped at 480 px, but never
+/// below the *larger* of the two sidebar minimums. The floor must not drop below
+/// `SIDEBAR_MIN_WIDTH_SECONDARY`, or a narrow window makes `max_w < min` and the
+/// `width.clamp(min, max_w)` for the secondary sidebar panics (std clamp requires
+/// `min <= max`).
+fn sidebar_max_width(viewport_width: f32) -> f32 {
+    (viewport_width * 0.5).clamp(SIDEBAR_MIN_WIDTH_SECONDARY, 480.0)
+}
+
+/// Interactive resize handle for a panel divider, Claude-style: a faint hairline
+/// at rest that fades into a soft, theme-inverting indicator bar as the pointer
+/// nears it (within `DIVIDER_PROXIMITY_RADIUS`) — hinting that the edge is
+/// draggable without the harsh full-height line egui's native resize paints.
+///
+/// `hit_rect` is the slim `Sense::click_and_drag` strip (`±DIVIDER_GRAB_HALF_WIDTH`
+/// around the line, spanning its full length) — narrow so it never steals clicks
+/// from panel content or overlaps the scroll bar. `divider` is the on-screen
+/// position of the line (x for a vertical divider, y for a horizontal one) where
+/// the bar is painted. Dragging adjusts `value` (a panel width or height) along
+/// the divider's axis; `sign` flips it (`-1.0` for a right/bottom panel that
+/// grows as the divider moves toward it). Double-clicking resets `value` to
+/// `default`.
 #[allow(clippy::too_many_arguments)]
 fn render_resize_divider(
     ctx: &egui::Context,
@@ -362,43 +481,77 @@ fn render_resize_divider(
     sign: f32,
     min: f32,
     max: f32,
+    default: f32,
     pal: &crate::frontend::theme::Palette,
 ) {
+    // Proximity is a wider band than the grab strip: the bar reveals as the
+    // pointer approaches, but only the slim strip senses drags/clicks.
+    let proximity = ctx
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|p| match kind {
+            DividerKind::Vertical => {
+                (p.x - divider).abs() <= DIVIDER_PROXIMITY_RADIUS
+                    && p.y >= hit_rect.top()
+                    && p.y <= hit_rect.bottom()
+            }
+            DividerKind::Horizontal => {
+                (p.y - divider).abs() <= DIVIDER_PROXIMITY_RADIUS
+                    && p.x >= hit_rect.left()
+                    && p.x <= hit_rect.right()
+            }
+        });
     egui::Area::new(Id::new(id))
         .order(Order::Foreground)
         .fixed_pos(hit_rect.min)
         .interactable(true)
         .show(ctx, |ui| {
             let (_, response) = ui.allocate_exact_size(hit_rect.size(), Sense::click_and_drag());
-            let active = response.hovered() || response.dragged();
-            if active {
+            if response.hovered() || response.dragged() {
                 ui.ctx().set_cursor_icon(match kind {
                     DividerKind::Vertical => CursorIcon::ResizeHorizontal,
                     DividerKind::Horizontal => CursorIcon::ResizeVertical,
                 });
             }
-            if response.dragged() {
+            if response.double_clicked() {
+                *value = default;
+            } else if response.dragged() {
                 let delta = match kind {
                     DividerKind::Vertical => response.drag_delta().x,
                     DividerKind::Horizontal => response.drag_delta().y,
                 };
                 *value = (*value + sign * delta).clamp(min, max);
             }
-            // A subtle pill on the divider line, shown only while interacted.
-            if active {
-                let pill = match kind {
-                    DividerKind::Vertical => Rect::from_center_size(
-                        egui::pos2(divider, hit_rect.center().y),
-                        egui::vec2(4.0, (hit_rect.height() * 0.16).clamp(20.0, 56.0)),
-                    ),
-                    DividerKind::Horizontal => Rect::from_center_size(
-                        egui::pos2(hit_rect.center().x, divider),
-                        egui::vec2((hit_rect.width() * 0.16).clamp(20.0, 56.0), 4.0),
-                    ),
-                };
-                ui.painter()
-                    .rect_filled(pill, egui::CornerRadius::same(2), pal.text_muted);
+            // Fade the bar in on approach / drag and out when the pointer leaves;
+            // `animate_bool_with_time` self-requests repaints while in flight.
+            let reveal = ui.ctx().animate_bool_with_time(
+                Id::new((id, "reveal")),
+                proximity || response.dragged(),
+                DIVIDER_FADE_SECONDS,
+            );
+            let mut alpha = egui::lerp(
+                DIVIDER_REST_ALPHA as f32..=DIVIDER_ACTIVE_ALPHA as f32,
+                reveal,
+            );
+            if response.dragged() {
+                alpha = (alpha + 20.0).min(245.0);
             }
+            let thickness = egui::lerp(1.0..=DIVIDER_BAR_WIDTH, reveal);
+            // Light-gray `hairline` tone (not the darker neutral tint) kept faint:
+            // a soft pale-gray line on light, a soft lighter-than-bg line on dark.
+            let [hr, hg, hb, _] = pal.hairline.to_array();
+            let color = egui::Color32::from_rgba_unmultiplied(hr, hg, hb, alpha.round() as u8);
+            let bar = match kind {
+                DividerKind::Vertical => Rect::from_center_size(
+                    egui::pos2(divider, hit_rect.center().y),
+                    egui::vec2(thickness, hit_rect.height()),
+                ),
+                DividerKind::Horizontal => Rect::from_center_size(
+                    egui::pos2(hit_rect.center().x, divider),
+                    egui::vec2(hit_rect.width(), thickness),
+                ),
+            };
+            ui.painter()
+                .rect_filled(bar, egui::CornerRadius::same(1), color);
         });
 }
 
@@ -838,17 +991,24 @@ fn render_entry_list(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
 
     if state.ui.entry_list.creating_group {
         ui.horizontal(|ui| {
-            let response = ui.text_edit_singleline(&mut state.ui.entry_list.new_group_name);
-            if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                actions.push(AppAction::CreateGroup {
-                    name: state.ui.entry_list.new_group_name.clone(),
-                });
-            }
-            if ui.button("Create").clicked() {
-                actions.push(AppAction::CreateGroup {
-                    name: state.ui.entry_list.new_group_name.clone(),
-                });
-            }
+            // Reserve the Create button on the right and let the field fill the rest.
+            // A plain left-to-right row puts the default-width (280 px) field first,
+            // which eats the whole row and pushes Create past the sidebar edge,
+            // overflowing and growing the panel on a narrow sidebar.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let create = ui.button("Create").clicked();
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.ui.entry_list.new_group_name)
+                        .desired_width(f32::INFINITY),
+                );
+                let submit =
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if create || submit {
+                    actions.push(AppAction::CreateGroup {
+                        name: state.ui.entry_list.new_group_name.clone(),
+                    });
+                }
+            });
         });
     }
 
@@ -1631,7 +1791,10 @@ const TASK_CATEGORIES: &[&str] = &[
 fn render_tasks_view(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     ui.horizontal(|ui| {
         ui.label("Search");
-        ui.text_edit_singleline(&mut state.tasks.task_list.search_query);
+        ui.add(
+            egui::TextEdit::singleline(&mut state.tasks.task_list.search_query)
+                .desired_width(f32::INFINITY),
+        );
     });
     ui.separator();
     ui.add_space(4.0);
@@ -1865,7 +2028,9 @@ fn render_engine_settings(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
 
         ui.horizontal(|ui| {
             ui.label("Command prefix:");
-            ui.text_edit_singleline(&mut draft.command_prefix);
+            ui.add(
+                egui::TextEdit::singleline(&mut draft.command_prefix).desired_width(f32::INFINITY),
+            );
         });
         ui.label(
             RichText::new("e.g. `wsl.exe -e` to run inside WSL; leave blank for a native install")
@@ -1922,7 +2087,10 @@ fn viewport_visual_settings_view(
 ) {
     ui.horizontal(|ui| {
         ui.label("Search");
-        ui.text_edit_singleline(&mut state.ui.settings.search_query);
+        ui.add(
+            egui::TextEdit::singleline(&mut state.ui.settings.search_query)
+                .desired_width(f32::INFINITY),
+        );
     });
     ui.separator();
 
