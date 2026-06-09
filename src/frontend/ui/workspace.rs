@@ -29,9 +29,10 @@ pub(super) fn render_workspace(
         // `show_workbench`) that writes `panel_height`, matching the sidebars.
         egui::Panel::bottom("bottom_panel")
             .exact_size(state.ui.layout.panel_height)
+            .show_separator_line(false)
             .frame(
                 Frame::default()
-                    .fill(crate::frontend::theme::palette(ui).bottom_panel)
+                    .fill(crate::frontend::theme::palette(ui).sidebar)
                     .inner_margin(Margin::symmetric(10, 8)),
             )
             .show_inside(ui, |ui| render_bottom_panel(state, ui, actions));

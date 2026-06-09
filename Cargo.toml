@@ -11,7 +11,7 @@ license = "Apache-2.0"
 [dependencies]
 anyhow = "1.0"
 bytemuck = { version = "1", features = ["derive"] }
-eframe = "0.34"
+eframe = { version = "0.34", features = ["persistence"] }
 egui-phosphor = "0.12.0"
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }

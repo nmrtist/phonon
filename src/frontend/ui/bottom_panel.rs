@@ -192,10 +192,7 @@ fn render_task_monitor_panel(
         ui.label(RichText::new("Task Monitor").strong());
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .button(format!(
-                    "{}  Open Tasks",
-                    egui_phosphor::regular::ROCKET_LAUNCH
-                ))
+                .button(format!("{}  Open Tasks", egui_phosphor::regular::LIGHTNING))
                 .clicked()
             {
                 state.ui.layout.active_primary_view = PrimaryView::Tasks;

@@ -156,7 +156,7 @@ pub fn apply(ctx: &egui::Context) {
     // bright default): a thin handle drawn from the foreground color at low
     // opacity reads as a soft gray on either theme, brightening on hover.
     let mut scroll = egui::style::ScrollStyle::solid();
-    scroll.bar_width = 6.0;
+    scroll.bar_width = 4.0;
     scroll.bar_inner_margin = 4.0;
     scroll.bar_outer_margin = 2.0;
     scroll.handle_min_length = 24.0;
@@ -164,9 +164,9 @@ pub fn apply(ctx: &egui::Context) {
     scroll.dormant_background_opacity = 0.0;
     scroll.active_background_opacity = 0.0;
     scroll.interact_background_opacity = 0.0;
-    scroll.dormant_handle_opacity = 0.32;
-    scroll.active_handle_opacity = 0.5;
-    scroll.interact_handle_opacity = 0.75;
+    scroll.dormant_handle_opacity = 0.18;
+    scroll.active_handle_opacity = 0.30;
+    scroll.interact_handle_opacity = 0.50;
 
     for theme in [egui::Theme::Light, egui::Theme::Dark] {
         ctx.style_mut_of(theme, |style| {
