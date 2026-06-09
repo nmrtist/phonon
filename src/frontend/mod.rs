@@ -8,6 +8,7 @@ mod jobs;
 mod md_commands;
 mod md_support;
 mod nanosheet_panel;
+mod qm_commands;
 mod reticular_panel;
 mod selection;
 mod services;

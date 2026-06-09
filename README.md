@@ -6,6 +6,7 @@ Computational environment for molecular & material research.
 
 - 3D visualization and editing of molecular/crystal structures
 - Force field geometry optimization
+- Molecular quantum mechanics (quantum chemistry) calculations
 - GUI-assisted molecular dynamics system setup and execution
 - Reticular structure builder (COFs, MOFs) from building blocks
 - Script-driven workflows supported on both GUI and CLI platforms

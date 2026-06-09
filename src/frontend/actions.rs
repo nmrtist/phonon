@@ -75,6 +75,8 @@ pub enum AppAction {
     CancelBuildingBlock,
     StartOptimization,
     CancelOptimizationPrompt,
+    StartQmCalculation,
+    CancelQmPrompt,
     ConfirmSupercell,
     CancelSupercellPrompt,
     ConfirmProteinPrep,

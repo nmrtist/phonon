@@ -314,6 +314,56 @@ impl OptimizationPrompt {
     }
 }
 
+/// User-editable configuration for a quantum-chemistry (chemx) calculation.
+#[derive(Debug, Clone)]
+pub struct QmPrompt {
+    pub method: crate::engines::qm::QmMethod,
+    pub basis: String,
+    pub charge: i32,
+    pub multiplicity: u32,
+    pub kind: crate::engines::qm::QmKind,
+    /// The calculation type the task opened with. `kind` is user-editable in the
+    /// panel; this stays fixed so re-opening the panel (e.g. on an entry switch)
+    /// doesn't clobber the user's choice, while switching to a different QM task
+    /// re-defaults the panel.
+    pub default_kind: crate::engines::qm::QmKind,
+    pub compute_properties: bool,
+}
+
+impl QmPrompt {
+    pub fn new(kind: crate::engines::qm::QmKind) -> Self {
+        Self {
+            // Default to a solid general-purpose hybrid-DFT model.
+            method: crate::engines::qm::QmMethod::Dft("b3lyp".to_string()),
+            basis: "def2-svp".to_string(),
+            charge: 0,
+            multiplicity: 1,
+            kind,
+            default_kind: kind,
+            compute_properties: false,
+        }
+    }
+
+    /// Build the engine request from this form against `structure`.
+    pub fn to_request(&self, structure: crate::domain::Structure) -> crate::engines::qm::QmRequest {
+        crate::engines::qm::QmRequest {
+            structure,
+            method: self.method.clone(),
+            basis: self.basis.clone(),
+            charge: self.charge,
+            multiplicity: self.multiplicity,
+            kind: self.kind,
+            compute_properties: self.compute_properties,
+        }
+    }
+}
+
+impl Default for QmPrompt {
+    fn default() -> Self {
+        Self::new(crate::engines::qm::QmKind::SinglePoint)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SupercellPrompt {
     pub repeats: [u32; 3],
@@ -895,6 +945,7 @@ pub struct UiState {
     pub nanosheet_builder: Option<NanosheetBuilderPanel>,
     pub block_editor: Option<BuildingBlockEditor>,
     pub pending_optimization: Option<OptimizationPrompt>,
+    pub pending_qm: Option<QmPrompt>,
     pub pending_supercell: Option<SupercellPrompt>,
     pub pending_protein_prep: Option<ProteinPrepPrompt>,
     pub pending_md_system: Option<MdSystemPrompt>,
@@ -932,6 +983,7 @@ impl Default for UiState {
             nanosheet_builder: None,
             block_editor: None,
             pending_optimization: None,
+            pending_qm: None,
             pending_supercell: None,
             pending_protein_prep: None,
             pending_md_system: None,
@@ -1075,6 +1127,19 @@ impl AppState {
         } else {
             &mut self.workspace_structure
         }
+    }
+
+    /// Make `entry_id` the active, loaded, and selected entry, persisting the
+    /// previously active entry's viewport first. Used by console commands that
+    /// add a new entry (an imported structure, a QM-optimized geometry, …).
+    pub fn show_entry(&mut self, entry_id: u64) {
+        self.save_viewport_for_active_entry();
+        self.entries.activate_entry(entry_id);
+        self.ensure_entry_loaded(entry_id);
+        self.history.set_active_entry(Some(entry_id));
+        self.ui.entry_list.selected_entry_ids.clear();
+        self.ui.entry_list.selected_entry_ids.insert(entry_id);
+        self.load_viewport_for_active_entry();
     }
 
     pub fn mark_structure_changed(&mut self) {
@@ -1280,6 +1345,7 @@ impl AppState {
     pub fn restore_edit_snapshot(&mut self, snapshot: EditSnapshot) {
         self.cancel_transient_jobs();
         self.ui.pending_optimization = None;
+        self.ui.pending_qm = None;
         self.ui.pending_supercell = None;
         self.ui.pending_md_system = None;
         self.ui.pending_md_run = None;
@@ -1362,6 +1428,7 @@ impl AppState {
 
     pub fn cancel_transient_jobs(&mut self) {
         self.jobs.cancel_optimization();
+        self.jobs.cancel_qm();
         self.jobs.cancel_engine();
     }
 

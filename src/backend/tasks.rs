@@ -7,6 +7,9 @@ pub enum TaskKind {
     CreateBuildingBlock,
     OptimizeGeometry,
     OptimizeCrystalGeometry,
+    RunQmEnergy,
+    RunQmOptimize,
+    RunQmFrequencies,
     TranslateIntoFirstUnitCell,
     ExpandSupercell,
     PrepareProtein,
@@ -23,6 +26,7 @@ pub enum TaskPanelKind {
     NanosheetBuilder,
     BuildingBlockEditor,
     OptimizationPrompt,
+    QmPrompt,
     SupercellPrompt,
     ProteinPrepPrompt,
     MdSystemPrompt,
@@ -56,6 +60,9 @@ pub enum TaskOutcome {
     EditInPlace,
     CreateEntry,
     FileOnly,
+    /// A read-only analysis that produces a report, not a structure change
+    /// (e.g. a single-point energy or frequency calculation).
+    Report,
 }
 
 impl TaskOutcome {
@@ -64,6 +71,7 @@ impl TaskOutcome {
             Self::EditInPlace => "edit-in-place",
             Self::CreateEntry => "create-entry",
             Self::FileOnly => "file-only",
+            Self::Report => "report",
         }
     }
 }
@@ -153,6 +161,50 @@ const TASK_CONTROLLERS: &[TaskController] = &[
         kind: TaskKind::OptimizeCrystalGeometry,
         panel: TaskPanelKind::OptimizationPrompt,
         outcome: TaskOutcome::EditInPlace,
+        backend: TaskBackend::BackgroundNative,
+        uses_run_directory: false,
+    },
+    // The three QM tasks share the QmPrompt panel; each opens it with a
+    // different default calculation type (the panel still lets you switch).
+    TaskController {
+        id: "qm-energy",
+        title: "Single-Point Energy",
+        short_title: "QM Energy",
+        theme: "Electronic Structure",
+        method: "HF / DFT / Post-HF",
+        application: "Energy, Dipole, Charges",
+        description: "Compute the energy (and optional dipole and atomic charges) at the current geometry with the chemx quantum-chemistry engine.",
+        kind: TaskKind::RunQmEnergy,
+        panel: TaskPanelKind::QmPrompt,
+        outcome: TaskOutcome::Report,
+        backend: TaskBackend::BackgroundNative,
+        uses_run_directory: false,
+    },
+    TaskController {
+        id: "qm-optimize",
+        title: "Geometry Optimization (QM)",
+        short_title: "QM Optimization",
+        theme: "Electronic Structure",
+        method: "HF / DFT Gradients",
+        application: "Quantum Geometry Relaxation",
+        description: "Relax the geometry on the quantum-chemical energy surface; the optimized structure is added as a new entry.",
+        kind: TaskKind::RunQmOptimize,
+        panel: TaskPanelKind::QmPrompt,
+        outcome: TaskOutcome::CreateEntry,
+        backend: TaskBackend::BackgroundNative,
+        uses_run_directory: false,
+    },
+    TaskController {
+        id: "qm-frequencies",
+        title: "Vibrational Frequencies",
+        short_title: "QM Frequencies",
+        theme: "Electronic Structure",
+        method: "Harmonic Hessian",
+        application: "IR Modes, Thermochemistry",
+        description: "Compute harmonic vibrational frequencies and thermochemistry at the current geometry with the chemx quantum-chemistry engine.",
+        kind: TaskKind::RunQmFrequencies,
+        panel: TaskPanelKind::QmPrompt,
+        outcome: TaskOutcome::Report,
         backend: TaskBackend::BackgroundNative,
         uses_run_directory: false,
     },

@@ -28,8 +28,9 @@ use crate::{
         actions::AppAction,
         jobs::{
             EngineWorkerMessage, GromacsPipelineRequest, OptimizationWorkerMessage,
-            engine_poll_frame, optimization_finished_message, request_next_optimization_poll,
-            spawn_gromacs_build_job, spawn_gromacs_pipeline_job, spawn_optimization_job,
+            QmWorkerMessage, engine_poll_frame, optimization_finished_message,
+            request_next_optimization_poll, spawn_gromacs_build_job, spawn_gromacs_pipeline_job,
+            spawn_optimization_job, spawn_qm_job,
         },
         md_support::{
             gromacs_topology_path_for_entry, load_md_topology_for_entry, write_md_system_context,
@@ -121,6 +122,8 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::CancelBuildingBlock => cancel_block_editor_task(state),
         AppAction::StartOptimization => start_pending_optimization(state),
         AppAction::CancelOptimizationPrompt => cancel_pending_optimization_request(state),
+        AppAction::StartQmCalculation => start_pending_qm(state),
+        AppAction::CancelQmPrompt => cancel_pending_qm_request(state),
         AppAction::ConfirmSupercell => confirm_pending_supercell(state),
         AppAction::CancelSupercellPrompt => cancel_pending_supercell_request(state),
         AppAction::ConfirmProteinPrep => confirm_pending_protein_prep(state),
@@ -348,6 +351,7 @@ pub fn handle_history_shortcuts(state: &mut AppState, ctx: &egui::Context) {
 pub fn poll_jobs(state: &mut AppState, ctx: &egui::Context) {
     poll_engine_job(state, ctx);
     poll_optimization_job(state, ctx);
+    poll_qm_job(state, ctx);
     poll_trajectory_jobs(state, ctx);
 }
 
@@ -725,6 +729,80 @@ fn poll_optimization_job(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
+fn poll_qm_job(state: &mut AppState, ctx: &egui::Context) {
+    let Some(running) = state.jobs.take_qm() else {
+        return;
+    };
+    let task_run_id = state.active_task_run;
+    let fingerprint_before = state.entries_fingerprint();
+
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        running
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // chemx runs the calculation in one opaque call, so a cancel only takes
+        // effect at the next stage boundary; the in-flight step runs to the end.
+        state.set_message(
+            "QM calculation stopping (the current step runs to completion)".to_string(),
+        );
+    }
+
+    let mut finished = false;
+    let mut changed = false;
+    while let Ok(message) = running.receiver.try_recv() {
+        match message {
+            QmWorkerMessage::Progress { stage } => {
+                state.set_message(format!("QM: {stage}; press Esc to stop"));
+            }
+            QmWorkerMessage::Finished(outcome) => {
+                let outcome = *outcome;
+                for line in outcome.summary.lines() {
+                    state.output_log.push(line.to_string());
+                }
+                // A QM run is a heavy calculation; its optimized geometry is
+                // surfaced as a new entry (the original structure is preserved),
+                // matching the convention for entry-producing tasks.
+                if let Some(optimized) = outcome.optimized_structure {
+                    let save_path = structure_io::default_structure_save_path(&optimized, None);
+                    let entry_id = add_and_show_entry(state, optimized, None, save_path);
+                    if let Some(task_run_id) = task_run_id {
+                        record_task_result_entry(state, task_run_id, entry_id);
+                    }
+                    changed = true;
+                }
+                state.set_message(format!(
+                    "QM complete: energy {:.6} Eh{}",
+                    outcome.energy_hartree,
+                    if outcome.converged {
+                        " (converged)"
+                    } else {
+                        " (not converged)"
+                    }
+                ));
+                complete_active_qm_task(state, TaskStatus::Completed);
+                finished = true;
+            }
+            QmWorkerMessage::Failed(error) => {
+                state.set_message(format!("QM calculation failed: {error}"));
+                complete_active_qm_task(state, TaskStatus::Failed);
+                finished = true;
+            }
+        }
+    }
+
+    if !finished {
+        state.jobs.set_qm(running);
+        request_next_optimization_poll(ctx);
+    } else {
+        // An optimization adds a new entry; persist it once (debounced).
+        if changed && state.entries_fingerprint() != fingerprint_before {
+            let now = ctx.input(|input| input.time);
+            state.request_autosave(now, AUTOSAVE_DEBOUNCE_SECS);
+        }
+        ctx.request_repaint();
+    }
+}
+
 fn reset_transient_state(state: &mut AppState) {
     state.cancel_transient_jobs();
     state.ui.pending_optimization = None;
@@ -959,6 +1037,24 @@ fn run_task(state: &mut AppState, task_run_id: u64) {
     state.ui.layout.active_primary_view = crate::frontend::state::PrimaryView::Tasks;
 }
 
+/// The calculation type a QM task opens its shared panel with.
+fn qm_default_kind(kind: TaskKind) -> crate::engines::qm::QmKind {
+    use crate::engines::qm::QmKind;
+    match kind {
+        TaskKind::RunQmOptimize => QmKind::Optimize,
+        TaskKind::RunQmFrequencies => QmKind::Frequencies,
+        _ => QmKind::SinglePoint,
+    }
+}
+
+/// Mark whichever QM task is active as finished. The three QM tasks share one
+/// panel, so we complete by trying each kind (only the active one matches).
+fn complete_active_qm_task(state: &mut AppState, status: TaskStatus) {
+    complete_active_task(state, TaskKind::RunQmEnergy, status);
+    complete_active_task(state, TaskKind::RunQmOptimize, status);
+    complete_active_task(state, TaskKind::RunQmFrequencies, status);
+}
+
 fn complete_active_task(state: &mut AppState, kind: TaskKind, status: TaskStatus) {
     let Some(task_run_id) = state.active_task_run else {
         return;
@@ -1080,6 +1176,22 @@ pub(super) fn ensure_panel_form(state: &mut AppState, task_run_id: u64) {
                         allow_cell,
                         &state.ui.selection,
                     ));
+            }
+        }
+        TaskPanelKind::QmPrompt => {
+            // Each QM task opens this shared panel with its own default
+            // calculation type. Re-default only when the task type differs from
+            // the one the current form was opened for, so an entry switch (which
+            // re-runs this) keeps any choice the user already made.
+            let default_kind = qm_default_kind(task.kind);
+            let stale = state
+                .ui
+                .pending_qm
+                .as_ref()
+                .map(|prompt| prompt.default_kind != default_kind)
+                .unwrap_or(true);
+            if stale {
+                state.ui.pending_qm = Some(crate::frontend::state::QmPrompt::new(default_kind));
             }
         }
         TaskPanelKind::SupercellPrompt => {
@@ -1674,6 +1786,39 @@ fn cancel_pending_optimization_request(state: &mut AppState) {
     state.set_message("forcefield optimization canceled".to_string());
     complete_active_task(state, TaskKind::OptimizeGeometry, TaskStatus::Failed);
     complete_active_task(state, TaskKind::OptimizeCrystalGeometry, TaskStatus::Failed);
+    close_active_task_panel(state);
+}
+
+fn start_pending_qm(state: &mut AppState) {
+    bind_active_panel_task(state, TaskPanelKind::QmPrompt);
+    let Some(prompt) = state.ui.pending_qm.clone() else {
+        return;
+    };
+    if state.jobs.qm_running() {
+        state.set_message("a QM calculation is already running; press Esc to stop".to_string());
+        return;
+    }
+    if state.structure().atoms.is_empty() {
+        state.set_message("open a structure before running a QM calculation".to_string());
+        return;
+    }
+    let request = prompt.to_request(state.structure().clone());
+    let job = spawn_qm_job(request);
+    state.set_source_path(None);
+    state.ui.editor = None;
+    state.ui.pending_qm = None;
+    state.jobs.set_qm(job);
+    if let Some(task_run_id) = state.active_task_run {
+        state.tasks.mark_status(task_run_id, TaskStatus::Running);
+    }
+    state.set_message("QM calculation running; press Esc to stop".to_string());
+}
+
+fn cancel_pending_qm_request(state: &mut AppState) {
+    bind_active_panel_task(state, TaskPanelKind::QmPrompt);
+    state.ui.pending_qm = None;
+    state.set_message("QM calculation canceled".to_string());
+    complete_active_qm_task(state, TaskStatus::Failed);
     close_active_task_panel(state);
 }
 

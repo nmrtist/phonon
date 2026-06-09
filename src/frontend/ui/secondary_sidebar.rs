@@ -120,6 +120,7 @@ fn render_secondary_sidebar_content(
         TaskPanelKind::NanosheetBuilder => render_nanosheet_task_panel(state, ui, actions),
         TaskPanelKind::BuildingBlockEditor => render_building_block_task_panel(state, ui, actions),
         TaskPanelKind::OptimizationPrompt => render_optimization_task_panel(state, ui, actions),
+        TaskPanelKind::QmPrompt => render_qm_task_panel(state, ui, actions),
         TaskPanelKind::SupercellPrompt => render_supercell_task_panel(state, ui, actions),
         TaskPanelKind::ProteinPrepPrompt => render_protein_prep_task_panel(state, ui, actions),
         TaskPanelKind::MdSystemPrompt => render_md_system_task_panel(state, ui, actions),
@@ -316,6 +317,96 @@ fn render_optimization_task_panel(
         }
     } else {
         ui.label("Optimization configuration is unavailable.");
+    }
+}
+
+fn render_qm_task_panel(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
+    use crate::engines::qm::{QmKind, QmMethod};
+
+    if let Some(prompt) = &mut state.ui.pending_qm {
+        egui::Grid::new("sidebar_qm_options")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Method:");
+                egui::ComboBox::from_id_salt("qm_method")
+                    .selected_text(prompt.method.label())
+                    .show_ui(ui, |ui| {
+                        for method in QmMethod::presets() {
+                            let label = method.label();
+                            ui.selectable_value(&mut prompt.method, method, label);
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Basis set:");
+                egui::ComboBox::from_id_salt("qm_basis")
+                    .selected_text(prompt.basis.clone())
+                    .show_ui(ui, |ui| {
+                        // chemx's bundled basis sets (H–Ar), smallest to largest.
+                        for basis in [
+                            "sto-3g",
+                            "6-31g",
+                            "6-311g(d,p)",
+                            "cc-pvdz",
+                            "cc-pvtz",
+                            "def2-svp",
+                            "def2-tzvp",
+                        ] {
+                            ui.selectable_value(&mut prompt.basis, basis.to_string(), basis);
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Charge:");
+                ui.add(egui::DragValue::new(&mut prompt.charge).range(-10..=10));
+                ui.end_row();
+
+                ui.label("Spin (2S+1):");
+                ui.add(egui::DragValue::new(&mut prompt.multiplicity).range(1..=11));
+                ui.end_row();
+            });
+
+        ui.separator();
+        ui.label("Calculation:");
+        ui.radio_value(&mut prompt.kind, QmKind::SinglePoint, "Single-point energy");
+        ui.radio_value(&mut prompt.kind, QmKind::Optimize, "Geometry optimization");
+        ui.radio_value(
+            &mut prompt.kind,
+            QmKind::Frequencies,
+            "Vibrational frequencies",
+        );
+        ui.checkbox(
+            &mut prompt.compute_properties,
+            "Compute dipole and atomic charges",
+        );
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("{}  Run", egui_phosphor::regular::PLAY))
+                .clicked()
+            {
+                actions.push(AppAction::StartQmCalculation);
+            }
+            if ui
+                .button(format!("{}  Cancel", egui_phosphor::regular::X))
+                .clicked()
+            {
+                actions.push(AppAction::CancelQmPrompt);
+            }
+        });
+    } else if state.jobs.qm_running() {
+        ui.label("QM calculation is running. Press Esc to stop.");
+        if ui
+            .button(format!("{}  Show Output", egui_phosphor::regular::TERMINAL))
+            .clicked()
+        {
+            state.ui.layout.show_panel = true;
+            state.ui.layout.active_panel_tab = PanelTab::Output;
+        }
+    } else {
+        ui.label("QM configuration is unavailable.");
     }
 }
 

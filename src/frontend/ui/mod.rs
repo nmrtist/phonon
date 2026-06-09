@@ -1826,6 +1826,7 @@ fn task_category(theme: &str) -> &'static str {
     match theme {
         "Reticular Design" | "2D Materials" => "Structure Builder",
         "Geometry" => "Optimization",
+        "Electronic Structure" => "Quantum Mechanics",
         "Molecular Dynamics" => "Molecular Dynamics",
         // "Structure Editing" and "Crystal Editing" both fold into editing.
         _ => "Structure Editing",
@@ -1837,6 +1838,7 @@ const TASK_CATEGORIES: &[&str] = &[
     "Structure Builder",
     "Structure Editing",
     "Optimization",
+    "Quantum Mechanics",
     "Molecular Dynamics",
 ];
 

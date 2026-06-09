@@ -94,6 +94,7 @@ fn execute_console_line_with_context(
         "representation" => representation_command(state, &words[1..]),
         "save" => save_command(state, context, &words[1..]),
         "md" => crate::frontend::md_commands::md_command(state, &words[1..]),
+        "qm" => crate::frontend::qm_commands::qm_command(state, &words[1..]),
         "help" => Ok(help_text()),
         _ => bail!("unknown command `{command}`"),
     }
@@ -1065,6 +1066,7 @@ fn help_text() -> String {
         "delete chain <A,B,...>",
         "md build   wrap the active structure in a simulation box and capture its topology",
         "md simulate [--time 1ns] [--temperature 300] [--no-relax]   run EM/NVT/NPT/production + analysis",
+        "qm energy|optimize|freq [--method b3lyp] [--basis def2-svp] [--charge 0] [--spin 1] [--properties]",
         "add --global to render commands to apply them project-wide",
         "script variables: ${name} or ${name:-default}",
     ]

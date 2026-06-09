@@ -63,6 +63,18 @@ const TASK_EXECUTORS: &[TaskExecutor] = &[
         run: run_crystal_optimization,
     },
     TaskExecutor {
+        kind: TaskKind::RunQmEnergy,
+        run: run_qm_panel,
+    },
+    TaskExecutor {
+        kind: TaskKind::RunQmOptimize,
+        run: run_qm_panel,
+    },
+    TaskExecutor {
+        kind: TaskKind::RunQmFrequencies,
+        run: run_qm_panel,
+    },
+    TaskExecutor {
         kind: TaskKind::TranslateIntoFirstUnitCell,
         run: run_translate_into_first_cell,
     },
@@ -116,6 +128,10 @@ fn run_geometry_optimization(state: &mut AppState, task_run_id: u64) {
 }
 
 fn run_crystal_optimization(state: &mut AppState, task_run_id: u64) {
+    open_panel_task(state, task_run_id);
+}
+
+fn run_qm_panel(state: &mut AppState, task_run_id: u64) {
     open_panel_task(state, task_run_id);
 }
 

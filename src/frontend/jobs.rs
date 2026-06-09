@@ -18,11 +18,15 @@ use crate::{
             BuildRequest, GromacsProgress, MaterialBuildRequest, StageResult, StageSpec,
             TopologySource, build_material_system, build_system, prepare_system, run_pipeline,
         },
+        qm::{QmOutcome, QmRequest},
         registry::EngineLaunch,
     },
     frontend::md_support::{FrameworkRunMetadata, MD_FRAMEWORK_FILE, write_md_system_context},
-    workflows::optimization::{
-        GeometryOptimizationProgress, GeometryOptimizationRequest, run_geometry_optimization,
+    workflows::{
+        optimization::{
+            GeometryOptimizationProgress, GeometryOptimizationRequest, run_geometry_optimization,
+        },
+        qm::{QmCalculationProgress, run_qm_calculation},
     },
 };
 
@@ -43,6 +47,18 @@ pub enum OptimizationWorkerMessage {
         structure: Structure,
         report: OptimizationReport,
     },
+    Failed(String),
+}
+
+/// A background quantum-chemistry (chemx) job the UI is polling.
+pub struct RunningQmJob {
+    pub cancel: Arc<AtomicBool>,
+    pub receiver: Receiver<QmWorkerMessage>,
+}
+
+pub enum QmWorkerMessage {
+    Progress { stage: String },
+    Finished(Box<QmOutcome>),
     Failed(String),
 }
 
@@ -103,6 +119,7 @@ impl RunningEngineJob {
 #[derive(Default)]
 pub struct JobManager {
     pub optimizer: Option<RunningOptimization>,
+    pub qm: Option<RunningQmJob>,
     pub engine: Option<RunningEngineJob>,
     /// In-flight background decode of an entry's trajectory file for playback.
     pub trajectory_load: Option<crate::frontend::trajectory::RunningTrajectoryLoad>,
@@ -123,6 +140,24 @@ impl JobManager {
 
     pub fn cancel_optimization(&mut self) {
         if let Some(running) = self.optimizer.take() {
+            running.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn qm_running(&self) -> bool {
+        self.qm.is_some()
+    }
+
+    pub fn take_qm(&mut self) -> Option<RunningQmJob> {
+        self.qm.take()
+    }
+
+    pub fn set_qm(&mut self, qm: RunningQmJob) {
+        self.qm = Some(qm);
+    }
+
+    pub fn cancel_qm(&mut self) {
+        if let Some(running) = self.qm.take() {
             running.cancel.store(true, Ordering::Relaxed);
         }
     }
@@ -182,6 +217,36 @@ pub fn spawn_optimization_job(
         receiver,
         latest_report: None,
     })
+}
+
+/// Spawn a quantum-chemistry calculation on a worker thread and return the live
+/// handle. The worker streams coarse stage updates, then a `Finished` outcome or
+/// `Failed` error. Caller stores the handle in [`JobManager`].
+pub fn spawn_qm_job(request: QmRequest) -> RunningQmJob {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_worker = Arc::clone(&cancel);
+
+    std::thread::spawn(move || {
+        let progress_sender = sender.clone();
+        let result = run_qm_calculation(
+            request,
+            cancel_for_worker,
+            move |QmCalculationProgress { stage }| {
+                let _ = progress_sender.send(QmWorkerMessage::Progress { stage });
+            },
+        );
+        match result {
+            Ok(result) => {
+                let _ = sender.send(QmWorkerMessage::Finished(Box::new(result.outcome)));
+            }
+            Err(error) => {
+                let _ = sender.send(QmWorkerMessage::Failed(error.to_string()));
+            }
+        }
+    });
+
+    RunningQmJob { cancel, receiver }
 }
 
 pub fn optimization_finished_message(report: OptimizationReport) -> String {
