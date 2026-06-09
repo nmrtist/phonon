@@ -12,7 +12,7 @@
 //! from [`Palette`] — a small set of semantic color roles — so a single
 //! `palette(ui)` lookup per frame flips every surface with the theme.
 
-use eframe::egui::{self, Color32, CornerRadius, Stroke, Visuals};
+use eframe::egui::{self, Color32, CornerRadius, Shadow, Stroke, Visuals};
 
 use crate::backend::config::ThemeMode;
 
@@ -142,11 +142,21 @@ pub fn palette(ui: &egui::Ui) -> Palette {
     Palette::for_dark_mode(ui.visuals().dark_mode)
 }
 
+/// Linear blend between two colors (`t` = 0 → `a`, `t` = 1 → `b`), done in
+/// egui's linear `Rgba` space so the midpoint reads naturally. Used for the
+/// gently-tinted resting state of the colored activity-bar icons.
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let a = egui::Rgba::from(a);
+    let b = egui::Rgba::from(b);
+    let t = t.clamp(0.0, 1.0);
+    Color32::from(a * (1.0 - t) + b * t)
+}
+
 /// Alpha applied to chrome surface fills when frosted glass is active, so the
 /// macOS vibrancy material behind the window shows through. Tunable: lower means
 /// more see-through glass, higher means a more solid tint (and better text
 /// contrast over busy wallpapers).
-pub const GLASS_FILL_ALPHA: u8 = 150;
+pub const GLASS_FILL_ALPHA: u8 = 125;
 
 /// Fill for an app-drawn chrome surface (title bar, activity bar, sidebars,
 /// status bar). When `glass` is on, the opaque palette color is made
@@ -270,6 +280,26 @@ fn build_visuals(dark: bool) -> Visuals {
     visuals.widgets.active.fg_stroke.color = pal.text_primary;
 
     visuals.window_stroke = Stroke::new(1.0, pal.hairline);
+
+    // Popups (tooltips, menus, combo lists) and windows get a soft, mostly
+    // *vertical* drop shadow. egui's default shoves the popup shadow well to the
+    // right ([6, 10] offset with only 8px of blur), which reads as a hard band
+    // pushed to one corner rather than a shadow cast by light from above. A
+    // near-centered offset with a wider blur diffuses it into a natural ambient
+    // halo; the dark theme needs a heavier alpha to register against near-black.
+    let shadow_alpha = if dark { 120 } else { 36 };
+    visuals.popup_shadow = Shadow {
+        offset: [0, 5],
+        blur: 18,
+        spread: 0,
+        color: Color32::from_black_alpha(shadow_alpha),
+    };
+    visuals.window_shadow = Shadow {
+        offset: [0, 10],
+        blur: 28,
+        spread: 0,
+        color: Color32::from_black_alpha(shadow_alpha),
+    };
 
     visuals
 }

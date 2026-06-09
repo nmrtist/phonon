@@ -902,7 +902,7 @@ fn render_activity_bar(state: &mut AppState, ui: &mut egui::Ui) {
                     Button::new(
                         RichText::new(view.icon())
                             .strong()
-                            .color(core_button_text_color(&pal, selected)),
+                            .color(activity_icon_color(*view, &pal, selected)),
                     )
                     .selected(selected),
                 )
@@ -2649,5 +2649,26 @@ fn core_button_text_color(pal: &crate::frontend::theme::Palette, selected: bool)
         pal.text_primary
     } else {
         pal.text_muted
+    }
+}
+
+/// Color for an activity-bar view's icon. macOS 27 ("Golden Gate") restores color
+/// to sidebar icons, so each primary view carries a distinct hue: full saturation
+/// when active, gently blended toward the muted text color when at rest (so the
+/// bar reads as softly colorful rather than a hard rainbow).
+fn activity_icon_color(
+    view: PrimaryView,
+    pal: &crate::frontend::theme::Palette,
+    selected: bool,
+) -> egui::Color32 {
+    let hue = match view {
+        PrimaryView::EntryList => pal.accent,
+        PrimaryView::Tasks => pal.status_amber,
+        PrimaryView::Settings => pal.status_green,
+    };
+    if selected {
+        hue
+    } else {
+        crate::frontend::theme::mix(hue, pal.text_muted, 0.55)
     }
 }

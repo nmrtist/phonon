@@ -67,13 +67,14 @@ pub fn reduce_transparency() -> bool {
 pub fn install(handle: impl raw_window_handle::HasWindowHandle) {
     use window_vibrancy::{NSVisualEffectMaterial, NSVisualEffectState, apply_vibrancy};
 
-    // `UnderWindowBackground` is the unified, whole-window backing material — the
-    // steady native frosted look (vs. the more see-through `Sidebar` or the
-    // heavier, control-like `HudWindow`). `Active` keeps it vibrant even when the
-    // window is not focused, so the glass doesn't flatten on blur.
+    // `Sidebar` is the translucent material AppKit uses behind Finder/Mail source
+    // lists — noticeably more see-through than the flatter `UnderWindowBackground`,
+    // so the frosted blur actually reads through the chrome. `Active` keeps it
+    // vibrant even when the window is not focused, so the glass doesn't flatten on
+    // blur.
     let _ = apply_vibrancy(
         &handle,
-        NSVisualEffectMaterial::UnderWindowBackground,
+        NSVisualEffectMaterial::Sidebar,
         Some(NSVisualEffectState::Active),
         None,
     );
