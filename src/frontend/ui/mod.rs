@@ -92,16 +92,18 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
     // harsh full-height hover line, and `show_separator_line(false)` hands the
     // at-rest hairline to our overlay too. `exact_size` also dodges egui's
     // resizable-panel growth bug (the same reason the bottom panel uses it).
-    // Transient per-frame rendered widths. egui's `Panel::exact_size` is a *floor*,
-    // not a cap: content with a larger min-width (the Settings sliders/combos) grows
-    // the panel past the requested width. We keep `*_sidebar_width` as the user's
-    // drag-chosen value — so switching to a view with narrower content lets the
-    // sidebar shrink back instead of ratcheting up to the widest view ever shown —
-    // but draw the resize divider and lay out the central column at the panel's
-    // *actual* rendered edge so they stay flush at any width. Seed them with the
-    // stored width so that if a panel is toggled on mid-frame (e.g. the bottom
-    // panel's "Open Tasks" button, which runs after this block) the divider falls
-    // back to a sane position for that one frame rather than the activity-bar edge.
+    // Transient per-frame panel widths used to place the resize divider and the
+    // central column flush with each sidebar's edge. `Panel::exact_size` makes the
+    // panel exactly this wide and *clips* any overflow to it (egui sets the panel's
+    // clip rect to the exact rect), so the visible edge is always the requested
+    // width — even when a wide widget (a Settings slider/combo at a narrow width)
+    // overflows. We must therefore key the divider off the requested width, NOT off
+    // `show_inside`'s returned `response.rect`: that response reports the *unclipped*
+    // content extent, which runs past the clipped panel edge whenever content
+    // overflows and leaves a blank band between the sidebar edge and the divider.
+    // Seed these with the stored width so that if a panel is toggled on mid-frame
+    // (e.g. the bottom panel's "Open Tasks" button, which runs after this block) the
+    // divider falls back to a sane position rather than the activity-bar edge.
     let mut primary_rendered_w = state.ui.layout.primary_sidebar_width;
     let mut secondary_rendered_w = state.ui.layout.secondary_sidebar_width;
 
@@ -113,7 +115,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .primary_sidebar_width
             .clamp(SIDEBAR_MIN_WIDTH_PRIMARY, max_w);
         state.ui.layout.primary_sidebar_width = width;
-        let r = egui::Panel::left("primary_sidebar")
+        egui::Panel::left("primary_sidebar")
             .resizable(false)
             .exact_size(width)
             .show_separator_line(false)
@@ -125,7 +127,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .show_inside(ui, |ui| {
                 render_primary_sidebar(state, ui, actions);
             });
-        primary_rendered_w = r.response.rect.width();
+        primary_rendered_w = width;
     }
 
     if state.ui.layout.show_secondary_sidebar {
@@ -136,7 +138,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .secondary_sidebar_width
             .clamp(SIDEBAR_MIN_WIDTH_SECONDARY, max_w);
         state.ui.layout.secondary_sidebar_width = width;
-        let r = egui::Panel::right("secondary_sidebar")
+        egui::Panel::right("secondary_sidebar")
             .resizable(false)
             .exact_size(width)
             .show_separator_line(false)
@@ -148,7 +150,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .show_inside(ui, |ui| {
                 render_secondary_sidebar(state, ui, actions);
             });
-        secondary_rendered_w = r.response.rect.width();
+        secondary_rendered_w = width;
     }
 
     egui::CentralPanel::default()
