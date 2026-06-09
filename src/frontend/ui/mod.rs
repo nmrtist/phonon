@@ -92,15 +92,13 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
     // harsh full-height hover line, and `show_separator_line(false)` hands the
     // at-rest hairline to our overlay too. `exact_size` also dodges egui's
     // resizable-panel growth bug (the same reason the bottom panel uses it).
-    // Transient per-frame panel widths used to place the resize divider and the
-    // central column flush with each sidebar's edge. `Panel::exact_size` makes the
-    // panel exactly this wide and *clips* any overflow to it (egui sets the panel's
-    // clip rect to the exact rect), so the visible edge is always the requested
-    // width — even when a wide widget (a Settings slider/combo at a narrow width)
-    // overflows. We must therefore key the divider off the requested width, NOT off
-    // `show_inside`'s returned `response.rect`: that response reports the *unclipped*
-    // content extent, which runs past the clipped panel edge whenever content
-    // overflows and leaves a blank band between the sidebar edge and the divider.
+    // Transient per-frame panel widths used to place the resize divider, the
+    // central column, and the bottom panel flush with each sidebar's edge. The
+    // sidebar content is pinned to the exact width by `render_pinned` (see its
+    // doc comment) so a wide widget can't push the panel's content rect — and thus
+    // egui's placement of the central column and the bottom panel nested in it —
+    // out past the requested edge. With overflow pinned away the rendered width is
+    // always the requested `width`, so we key everything off `width` directly.
     // Seed these with the stored width so that if a panel is toggled on mid-frame
     // (e.g. the bottom panel's "Open Tasks" button, which runs after this block) the
     // divider falls back to a sane position rather than the activity-bar edge.
@@ -125,7 +123,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
-                render_primary_sidebar(state, ui, actions);
+                render_pinned(ui, |ui| render_primary_sidebar(state, ui, actions));
             });
         primary_rendered_w = width;
     }
@@ -148,7 +146,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
-                render_secondary_sidebar(state, ui, actions);
+                render_pinned(ui, |ui| render_secondary_sidebar(state, ui, actions));
             });
         secondary_rendered_w = width;
     }
@@ -882,6 +880,31 @@ fn render_activity_bar(state: &mut AppState, ui: &mut egui::Ui) {
             }
         }
     });
+}
+
+/// Render sidebar content pinned to the panel's exact width.
+///
+/// `Panel::exact_size` clips the panel *fill* to the requested width, but a child
+/// widget that can't shrink that far (a Settings slider or combo carrying a fixed
+/// label) still grows the content frame's `response.rect`. egui advances the
+/// parent layout cursor by that grown rect, so the central column — and the
+/// bottom panel nested inside it — get pushed out to the content edge while the
+/// sidebar fill and our resize divider stay at the requested width, leaving a
+/// blank band beside the sidebar (and the bottom panel failing to follow a narrow
+/// drag). Rendering the content into a width-bounded, clipped child and advancing
+/// the cursor by that fixed rect pins the response rect to the requested width, so
+/// the fill, divider, central column, and bottom panel all stay flush at any
+/// width. Content too wide to fit is clipped rather than overflowing.
+fn render_pinned(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let rect = ui.max_rect();
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    add(&mut child);
+    ui.advance_cursor_after_rect(rect);
 }
 
 fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
