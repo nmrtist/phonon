@@ -173,6 +173,7 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::BrowseEngineProgram(id) => browse_engine_program(state, id),
         AppAction::RunConsoleCommand(command) => run_console_command(state, &command),
         AppAction::SetThemeMode(mode) => set_theme_mode(state, mode, ctx),
+        AppAction::SetGlass(on) => set_glass(state, on),
         AppAction::LoadTrajectory(entry_id, trajectory) => {
             load_trajectory(state, entry_id, trajectory, ctx)
         }
@@ -251,6 +252,16 @@ fn resize_panel(state: &mut AppState, delta: f32, ctx: &egui::Context) {
 
 fn reset_panel(state: &mut AppState) {
     state.ui.layout.panel_height = PANEL_DEFAULT_HEIGHT;
+}
+
+/// Persist the frosted-glass preference. The clear color and chrome fills read
+/// `config.glass` each frame (resolved into `ui.glass_active`), so the change is
+/// visible immediately; only the stored setting needs writing here.
+fn set_glass(state: &mut AppState, on: bool) {
+    state.config.glass = on;
+    if let Err(error) = save_config(&state.config) {
+        state.set_message(format!("Could not save glass preference: {error}"));
+    }
 }
 
 /// How long after an entry change a coalesced autosave waits before flushing.

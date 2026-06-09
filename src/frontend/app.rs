@@ -42,6 +42,13 @@ pub fn run(structure: Structure, source_path: Option<PathBuf>) -> Result<()> {
                 app.state.ui.gpu_ready = true;
             }
             crate::frontend::theme::set_preference(&cc.egui_ctx, app.state.config.theme);
+            // Install the frosted-glass material behind the content (macOS),
+            // only when the vibrancy path is enabled. Runs on the main thread
+            // here, as `apply_vibrancy` requires.
+            #[cfg(target_os = "macos")]
+            if crate::frontend::glass::supported() {
+                crate::frontend::glass::install(cc);
+            }
             Ok(Box::new(app))
         }),
     )
@@ -63,12 +70,21 @@ fn window_viewport() -> egui::ViewportBuilder {
 
     #[cfg(target_os = "macos")]
     {
-        viewport
+        let viewport = viewport
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
             .with_title_shown(false)
             .with_titlebar_buttons_shown(true)
-            .with_has_shadow(true)
+            .with_has_shadow(true);
+        // Only make the NSWindow non-opaque when the vibrancy path is enabled
+        // (see `glass::supported`). A transparent surface without a correctly
+        // layered effect view behind it renders blank, so the default stays
+        // opaque.
+        if crate::frontend::glass::supported() {
+            viewport.with_transparent(true)
+        } else {
+            viewport
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -246,6 +262,12 @@ impl eframe::App for PhononApp {
         dispatcher::poll_jobs(&mut self.state, &ctx);
         dispatcher::handle_history_shortcuts(&mut self.state, &ctx);
 
+        // Resolve once per frame whether the frosted glass is revealed; read by
+        // the chrome fills below and by `clear_color`. Re-evaluated every frame
+        // so toggling the preference or the OS "Reduce Transparency" setting
+        // takes effect live.
+        self.state.ui.glass_active = crate::frontend::glass::glass_active(self.state.config.glass);
+
         let mut actions = Vec::<AppAction>::new();
         ui::show_workbench(&mut self.state, ui, &mut actions);
         self.show_file_drop_overlay(&ctx);
@@ -266,6 +288,13 @@ impl eframe::App for PhononApp {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         #[cfg(target_os = "macos")]
         {
+            // With glass revealed, clear fully transparent so the vibrancy
+            // material behind the window shows through the semi-transparent
+            // chrome. Otherwise keep the opaque backing matched to the central
+            // panel fill (seamless native title bar, intact shadow).
+            if self.state.ui.glass_active {
+                return [0.0, 0.0, 0.0, 0.0];
+            }
             crate::frontend::theme::Palette::for_dark_mode(visuals.dark_mode)
                 .window_backing
                 .to_normalized_gamma_f32()

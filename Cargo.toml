@@ -25,5 +25,14 @@ serde_json = "1.0"
 ureq = "3.3.0"
 uuid = { version = "1", features = ["v4"] }
 
+# macOS-only: Apple-style frosted-glass (NSVisualEffectView vibrancy). The
+# objc2 / raw-window-handle versions line up with window-vibrancy 0.7 and eframe
+# 0.34 (both on raw-window-handle 0.6), so no handle bridging is needed.
+[target.'cfg(target_os = "macos")'.dependencies]
+window-vibrancy = "0.7"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+raw-window-handle = "0.6"
+
 [dev-dependencies]
 pollster = "0.4"

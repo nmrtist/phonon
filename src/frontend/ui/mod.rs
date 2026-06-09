@@ -39,6 +39,10 @@ const WINDOW_CORNER_RADIUS: u8 = 10;
 pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let ctx = ui.ctx().clone();
     let pal = crate::frontend::theme::palette(ui);
+    // When frosted glass is active, the perimeter chrome (title/status/activity
+    // bars and sidebars) is painted semi-transparent so the window's vibrancy
+    // material shows through; the central panel stays opaque (see below).
+    let glass = state.ui.glass_active;
 
     render_window_resize_handles(&ctx);
 
@@ -64,7 +68,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         .exact_size(32.0)
         .frame(
             Frame::default()
-                .fill(pal.title_bar)
+                .fill(crate::frontend::theme::chrome_fill(pal.title_bar, glass))
                 .corner_radius(top_corners)
                 .inner_margin(Margin::symmetric(8, 3)),
         )
@@ -74,7 +78,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         .exact_size(24.0)
         .frame(
             Frame::default()
-                .fill(pal.status_bar)
+                .fill(crate::frontend::theme::chrome_fill(pal.status_bar, glass))
                 .corner_radius(bottom_corners)
                 .inner_margin(Margin::symmetric(10, 3)),
         )
@@ -85,7 +89,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         .resizable(false)
         .frame(
             Frame::default()
-                .fill(pal.activity_bar)
+                .fill(crate::frontend::theme::chrome_fill(pal.activity_bar, glass))
                 .inner_margin(Margin::symmetric(6, 10)),
         )
         .show_inside(ui, |ui| render_activity_bar(state, ui));
@@ -125,7 +129,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .show_separator_line(false)
             .frame(
                 Frame::default()
-                    .fill(pal.sidebar)
+                    .fill(crate::frontend::theme::chrome_fill(pal.sidebar, glass))
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
@@ -147,7 +151,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .show_separator_line(false)
             .frame(
                 Frame::default()
-                    .fill(pal.sidebar)
+                    .fill(crate::frontend::theme::chrome_fill(pal.sidebar, glass))
                     .inner_margin(Margin::symmetric(10, 10)),
             )
             .show_inside(ui, |ui| {
@@ -751,6 +755,13 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
                             if ui.radio(current == mode, mode.label()).clicked() {
                                 actions.push(AppAction::SetThemeMode(mode));
                                 ui.close();
+                            }
+                        }
+                        if crate::frontend::glass::supported() {
+                            ui.separator();
+                            let mut glass = state.config.glass;
+                            if ui.checkbox(&mut glass, "Frosted glass").changed() {
+                                actions.push(AppAction::SetGlass(glass));
                             }
                         }
                     });
@@ -2175,6 +2186,15 @@ fn viewport_visual_settings_view(
                             }
                         });
                 });
+                if crate::frontend::glass::supported() {
+                    let mut glass = state.config.glass;
+                    if ui
+                        .checkbox(&mut glass, "Frosted glass (translucent sidebars)")
+                        .changed()
+                    {
+                        actions.push(AppAction::SetGlass(glass));
+                    }
+                }
             });
 
             settings_section(ui, "Engines", &search, |ui| {

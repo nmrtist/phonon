@@ -136,6 +136,8 @@ pub enum AppAction {
     RunConsoleCommand(String),
     /// Set the light/dark appearance preference and persist it.
     SetThemeMode(crate::backend::config::ThemeMode),
+    /// Toggle the Apple-style frosted-glass material and persist it.
+    SetGlass(bool),
     /// Decode an MD trajectory for the given entry (from its run directory) in
     /// the background and begin playback once it is ready. The optional path
     /// selects a specific stage's trajectory (project-root-relative, as stored);

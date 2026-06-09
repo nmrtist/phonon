@@ -142,6 +142,26 @@ pub fn palette(ui: &egui::Ui) -> Palette {
     Palette::for_dark_mode(ui.visuals().dark_mode)
 }
 
+/// Alpha applied to chrome surface fills when frosted glass is active, so the
+/// macOS vibrancy material behind the window shows through. Tunable: lower means
+/// more see-through glass, higher means a more solid tint (and better text
+/// contrast over busy wallpapers).
+pub const GLASS_FILL_ALPHA: u8 = 150;
+
+/// Fill for an app-drawn chrome surface (title bar, activity bar, sidebars,
+/// status bar). When `glass` is on, the opaque palette color is made
+/// semi-transparent so the window's vibrancy material shows through; otherwise
+/// it is returned unchanged. The central panel and 3D viewport keep their opaque
+/// fills, so the glass never sits behind dense content or the GPU scene.
+pub fn chrome_fill(base: Color32, glass: bool) -> Color32 {
+    if glass {
+        let [r, g, b, _] = base.to_array();
+        Color32::from_rgba_unmultiplied(r, g, b, GLASS_FILL_ALPHA)
+    } else {
+        base
+    }
+}
+
 /// Register the light and dark themes and start following the system.
 ///
 /// Both visual sets are installed so egui can switch live when the OS

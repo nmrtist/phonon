@@ -933,6 +933,11 @@ pub struct UiState {
     /// Set once at startup when the GPU molecule renderer initializes
     /// successfully; gates the GPU rendering path in the viewport.
     pub gpu_ready: bool,
+    /// Resolved once per frame: whether the frosted-glass material should be
+    /// revealed (user enabled it, the platform supports it, and Reduce
+    /// Transparency is off). Drives the transparent clear color and the
+    /// semi-transparent chrome fills. See [`crate::frontend::glass`].
+    pub glass_active: bool,
     pub hovered_atom: Option<usize>,
     pub selection: AtomSelection,
     pub viewport: ViewportVisualState,
@@ -971,6 +976,7 @@ impl Default for UiState {
             camera: ViewCamera::default(),
             viewport_cache: ViewportCache::default(),
             gpu_ready: false,
+            glass_active: false,
             hovered_atom: None,
             selection: AtomSelection::default(),
             viewport: ViewportVisualState::default(),
