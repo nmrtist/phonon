@@ -24,15 +24,21 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = "3.3.0"
 uuid = { version = "1", features = ["v4"] }
+# Window handle for the frosted-glass backdrop install (all platforms; the
+# version lines up with eframe 0.34, both on raw-window-handle 0.6).
+raw-window-handle = "0.6"
 
-# macOS-only: Apple-style frosted-glass (NSVisualEffectView vibrancy). The
-# objc2 / raw-window-handle versions line up with window-vibrancy 0.7 and eframe
-# 0.34 (both on raw-window-handle 0.6), so no handle bridging is needed.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Frosted-glass backdrop blur: macOS NSVisualEffectView vibrancy + Windows
+# Acrylic, both via window-vibrancy 0.7. Linux has no portable compositor blur
+# and uses a translucent-tint fallback (no extra deps).
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 window-vibrancy = "0.7"
+
+# macOS-only AppKit interop: re-parent the effect view behind the Metal content
+# and read the "Reduce Transparency" accessibility setting.
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-raw-window-handle = "0.6"
 
 [dev-dependencies]
 pollster = "0.4"

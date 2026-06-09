@@ -23,9 +23,20 @@
 /// areas of the Metal layer instead of covering it.
 const VIBRANCY_ENABLED: bool = true;
 
-/// Whether this platform can show the frosted-glass material at all.
+/// Whether this platform can show *some* translucent glass effect — gating the
+/// settings toggle and whether [`glass_active`] may return true.
+///
+/// - **macOS**: a real `NSVisualEffectView` frost (vibrancy).
+/// - **Windows**: an Acrylic backdrop blur (Win10 1803+/Win11).
+/// - **Linux**: no portable compositor-blur API exists, so it falls back to a
+///   plain translucent *tint* — the transparent window simply lets the desktop
+///   show through the semi-transparent chrome fills (no blur).
 pub const fn supported() -> bool {
-    cfg!(target_os = "macos") && VIBRANCY_ENABLED
+    cfg!(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux"
+    )) && VIBRANCY_ENABLED
 }
 
 /// Whether the frosted glass should be *revealed* this frame: the user enabled
@@ -87,13 +98,36 @@ pub fn reduce_transparency() -> bool {
     false
 }
 
-/// Install the macOS vibrancy material behind the window content, once, at
-/// startup. Safe to call regardless of the user's current preference: when glass
-/// is off, the opaque clear color and chrome fills cover the view entirely, so
-/// it costs nothing visible. Must run on the main thread (it does — this is
-/// called from eframe's creation closure).
-#[cfg(target_os = "macos")]
+/// Install any one-time OS backdrop effect for the glass material, at startup.
+/// Dispatched per platform (macOS vibrancy, Windows Acrylic, Linux none). Safe to
+/// call regardless of the user's current preference: when glass is off, the
+/// opaque clear color and chrome fills cover the effect entirely, so it costs
+/// nothing visible. Must run on the main thread (called from eframe's creation
+/// closure).
 pub fn install(handle: impl raw_window_handle::HasWindowHandle) {
+    #[cfg(target_os = "macos")]
+    install_macos(handle);
+    #[cfg(target_os = "windows")]
+    install_windows(handle);
+    // Linux: no portable backdrop-blur API. The translucent-tint fallback needs
+    // no install — the transparent window and semi-transparent fills do the work.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = handle;
+}
+
+/// Windows Acrylic backdrop blur (Win10 1803+/Win11). On failure (older Windows)
+/// this is a no-op and the app degrades to the plain translucent tint, since the
+/// window is already transparent.
+#[cfg(target_os = "windows")]
+fn install_windows(handle: impl raw_window_handle::HasWindowHandle) {
+    // Near-transparent neutral tint; the app's chrome fills supply the actual
+    // color, so Acrylic only contributes the blur.
+    let _ = window_vibrancy::apply_acrylic(&handle, Some((18, 18, 20, 16)));
+}
+
+/// macOS vibrancy: install an `NSVisualEffectView` behind the window content.
+#[cfg(target_os = "macos")]
+fn install_macos(handle: impl raw_window_handle::HasWindowHandle) {
     use window_vibrancy::{NSVisualEffectMaterial, NSVisualEffectState, apply_vibrancy};
 
     // `Sidebar` is the translucent material AppKit uses behind Finder/Mail source
