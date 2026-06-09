@@ -49,15 +49,16 @@ pub struct AppConfig {
     #[serde(default)]
     pub theme: ThemeMode,
     /// Apple-style frosted-glass (vibrancy) material on the window chrome.
-    /// Defaults on; only takes effect where the platform supports it (macOS for
-    /// now) and is auto-suppressed when the OS "Reduce Transparency" setting is
-    /// on. See [`crate::frontend::glass`].
+    /// Defaults off: the effect costs continuous backdrop-blur compositing while
+    /// revealed, so it is opt-in (performance first). Only takes effect where the
+    /// platform supports it (macOS for now) and is auto-suppressed when the OS
+    /// "Reduce Transparency" setting is on. See [`crate::frontend::glass`].
     #[serde(default = "default_glass")]
     pub glass: bool,
 }
 
 fn default_glass() -> bool {
-    true
+    false
 }
 
 impl Default for AppConfig {

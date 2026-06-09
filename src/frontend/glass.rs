@@ -36,10 +36,39 @@ pub fn glass_active(enabled: bool) -> bool {
 }
 
 /// macOS "Reduce Transparency" accessibility setting (always `false` elsewhere).
-/// Read live each frame so toggling it in System Settings takes effect without
-/// restarting the app.
+///
+/// Resolved once per frame by [`glass_active`], so it must stay cheap. The
+/// underlying value changes only when the user flips it in System Settings, so
+/// the AppKit query is cached and refreshed at most a couple of times a second
+/// (see `TTL`) rather than issued on every repaint — keeping the per-frame cost
+/// effectively zero while still reflecting a change within half a second (no
+/// restart needed).
 #[cfg(target_os = "macos")]
 pub fn reduce_transparency() -> bool {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    // Only ever touched from the main (UI) thread, so a thread-local Cell needs
+    // no locking.
+    thread_local! {
+        static CACHE: Cell<Option<(Instant, bool)>> = const { Cell::new(None) };
+    }
+    const TTL: Duration = Duration::from_millis(500);
+
+    if let Some((read_at, value)) = CACHE.with(Cell::get) {
+        if read_at.elapsed() < TTL {
+            return value;
+        }
+    }
+    let value = query_reduce_transparency();
+    CACHE.with(|cache| cache.set(Some((Instant::now(), value))));
+    value
+}
+
+/// One uncached AppKit read of the Reduce Transparency setting. See the cache in
+/// [`reduce_transparency`].
+#[cfg(target_os = "macos")]
+fn query_reduce_transparency() -> bool {
     use objc2::runtime::AnyObject;
     // SAFETY: NSWorkspace is part of AppKit (linked via window-vibrancy). We only
     // fetch the shared instance and read a BOOL property on it.
