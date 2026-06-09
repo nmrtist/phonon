@@ -29,8 +29,8 @@ pub struct EngineId(pub &'static str);
 
 impl EngineId {
     pub const UFF: Self = Self("uff");
+    pub const CHEMX: Self = Self("chemx");
     pub const GROMACS: Self = Self("gromacs");
-    pub const ORCA: Self = Self("orca");
     pub const QUANTUM_ESPRESSO: Self = Self("qe");
 
     pub fn as_str(self) -> &'static str {
@@ -136,6 +136,11 @@ struct EngineSpec {
     version_arg: Option<&'static str>,
 }
 
+/// Version of the bundled `chemx` quantum-chemistry library. chemx exposes no
+/// version constant, so keep this in sync with the `chemx` dependency in
+/// `Cargo.toml`.
+const CHEMX_VERSION: &str = "0.1.0";
+
 const ENGINE_SPECS: &[EngineSpec] = &[
     EngineSpec {
         id: EngineId::GROMACS,
@@ -143,13 +148,6 @@ const ENGINE_SPECS: &[EngineSpec] = &[
         description: "Molecular dynamics and minimization (gmx).",
         candidate_executables: &["gmx", "gmx_mpi", "gmx_d"],
         version_arg: Some("--version"),
-    },
-    EngineSpec {
-        id: EngineId::ORCA,
-        name: "ORCA",
-        description: "Quantum chemistry program.",
-        candidate_executables: &["orca"],
-        version_arg: None,
     },
     EngineSpec {
         id: EngineId::QUANTUM_ESPRESSO,
@@ -178,13 +176,21 @@ impl EngineRegistry {
     /// because it runs each engine's `--version` (a WSL launch can take
     /// seconds to cold-start).
     pub fn probe(overrides: &HashMap<String, EngineLaunch>) -> Self {
-        let mut capabilities = Vec::with_capacity(ENGINE_SPECS.len() + 1);
+        let mut capabilities = Vec::with_capacity(ENGINE_SPECS.len() + 2);
         capabilities.push(EngineCapability {
             id: EngineId::UFF,
             name: "UFF (built-in)",
             description: "Built-in Universal Force Field optimizer.",
             launch: None,
             version: None,
+            built_in: true,
+        });
+        capabilities.push(EngineCapability {
+            id: EngineId::CHEMX,
+            name: "chemx (built-in)",
+            description: "Built-in pure-Rust quantum mechanics (HF/DFT/MP2/CC).",
+            launch: None,
+            version: Some(CHEMX_VERSION.to_string()),
             built_in: true,
         });
 
@@ -371,18 +377,20 @@ mod tests {
     fn override_launch_is_honored() {
         let mut overrides = HashMap::new();
         overrides.insert(
-            EngineId::ORCA.as_str().to_string(),
+            EngineId::QUANTUM_ESPRESSO.as_str().to_string(),
             EngineLaunch {
                 command_prefix: vec!["wsl.exe".to_string(), "-e".to_string()],
-                program: "/opt/orca/orca".to_string(),
+                program: "/opt/qe/pw.x".to_string(),
             },
         );
 
         let registry = EngineRegistry::probe(&overrides);
-        let orca = registry.get(EngineId::ORCA).expect("orca entry");
-        assert!(orca.available());
-        let launch = orca.launch.as_ref().expect("launch");
-        assert_eq!(launch.program, "/opt/orca/orca");
+        let qe = registry
+            .get(EngineId::QUANTUM_ESPRESSO)
+            .expect("quantum espresso entry");
+        assert!(qe.available());
+        let launch = qe.launch.as_ref().expect("launch");
+        assert_eq!(launch.program, "/opt/qe/pw.x");
         assert_eq!(launch.command_prefix, vec!["wsl.exe", "-e"]);
     }
 

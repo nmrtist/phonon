@@ -1,7 +1,7 @@
 //! Generic subprocess execution layer used by external engine integrations.
 //!
 //! `engines::process` provides the foundation for running command-line tools
-//! (GROMACS, ORCA, Quantum ESPRESSO, ...) with streamed stdout/stderr, a
+//! (GROMACS, Quantum ESPRESSO, ...) with streamed stdout/stderr, a
 //! cooperative cancellation flag, and a wall-clock timeout. It deliberately
 //! avoids any async runtime so that engine jobs can be spawned from worker
 //! threads spawned by [`crate::frontend::jobs::JobManager`].
