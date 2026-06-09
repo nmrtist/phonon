@@ -145,4 +145,12 @@ pub enum AppAction {
     SetTrajectoryFrame(usize),
     /// Close trajectory playback, returning the viewport to the static entry.
     StopTrajectory,
+    /// Resize a sidebar by a signed delta (drag direction already applied).
+    ResizeSidebar(crate::frontend::state::Side, f32),
+    /// Reset a sidebar to its default width.
+    ResetSidebar(crate::frontend::state::Side),
+    /// Resize the bottom panel by a signed delta.
+    ResizePanel(f32),
+    /// Reset the bottom panel to its default height.
+    ResetPanel,
 }

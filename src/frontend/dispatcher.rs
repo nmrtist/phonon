@@ -38,7 +38,11 @@ use crate::{
             BuildingBlockService, NanosheetService, ReticularService, StructureService,
             require_periodic_structure,
         },
-        state::AppState,
+        state::{
+            AppState, PANEL_DEFAULT_HEIGHT, PANEL_MIN_HEIGHT, SIDEBAR_DEFAULT_WIDTH_PRIMARY,
+            SIDEBAR_DEFAULT_WIDTH_SECONDARY, SIDEBAR_MIN_WIDTH_PRIMARY,
+            SIDEBAR_MIN_WIDTH_SECONDARY, Side, sidebar_max_width,
+        },
         structure_import::{import_document, load_document},
         task_executor::task_executor,
         trajectory::{DEFAULT_PLAYBACK_FPS, TrajectoryPlayback, spawn_trajectory_load},
@@ -172,6 +176,10 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::ToggleTrajectoryPlay => toggle_trajectory_play(state, ctx),
         AppAction::SetTrajectoryFrame(frame) => set_trajectory_frame(state, frame),
         AppAction::StopTrajectory => stop_trajectory(state),
+        AppAction::ResizeSidebar(side, delta) => resize_sidebar(state, side, delta, ctx),
+        AppAction::ResetSidebar(side) => reset_sidebar(state, side, ctx),
+        AppAction::ResizePanel(delta) => resize_panel(state, delta, ctx),
+        AppAction::ResetPanel => reset_panel(state),
     }
     if let Some(before) = fingerprint_before
         && state.entries_fingerprint() != before
@@ -198,6 +206,48 @@ fn set_theme_mode(
     if let Err(error) = save_config(&state.config) {
         state.set_message(format!("Could not save theme preference: {error}"));
     }
+}
+
+fn resize_sidebar(state: &mut AppState, side: Side, delta: f32, ctx: &egui::Context) {
+    let max_w = sidebar_max_width(ctx.viewport_rect().width());
+    let (width, min) = match side {
+        Side::Primary => (
+            &mut state.ui.layout.primary_sidebar_width,
+            SIDEBAR_MIN_WIDTH_PRIMARY,
+        ),
+        Side::Secondary => (
+            &mut state.ui.layout.secondary_sidebar_width,
+            SIDEBAR_MIN_WIDTH_SECONDARY,
+        ),
+    };
+    *width = (*width + delta).clamp(min, max_w);
+}
+
+fn reset_sidebar(state: &mut AppState, side: Side, ctx: &egui::Context) {
+    let max_w = sidebar_max_width(ctx.viewport_rect().width());
+    let (width, min, default) = match side {
+        Side::Primary => (
+            &mut state.ui.layout.primary_sidebar_width,
+            SIDEBAR_MIN_WIDTH_PRIMARY,
+            SIDEBAR_DEFAULT_WIDTH_PRIMARY,
+        ),
+        Side::Secondary => (
+            &mut state.ui.layout.secondary_sidebar_width,
+            SIDEBAR_MIN_WIDTH_SECONDARY,
+            SIDEBAR_DEFAULT_WIDTH_SECONDARY,
+        ),
+    };
+    *width = default.clamp(min, max_w);
+}
+
+fn resize_panel(state: &mut AppState, delta: f32, ctx: &egui::Context) {
+    let max_h = (ctx.viewport_rect().height() * 0.6).max(160.0);
+    state.ui.layout.panel_height =
+        (state.ui.layout.panel_height + delta).clamp(PANEL_MIN_HEIGHT, max_h);
+}
+
+fn reset_panel(state: &mut AppState) {
+    state.ui.layout.panel_height = PANEL_DEFAULT_HEIGHT;
 }
 
 /// How long after an entry change a coalesced autosave waits before flushing.

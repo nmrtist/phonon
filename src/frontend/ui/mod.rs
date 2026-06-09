@@ -11,7 +11,11 @@ use crate::{
         CartoonSectionStyle, LightPreset, SurfaceStyle,
         actions::AppAction,
         services::entry_details,
-        state::{AppState, AtomStyle, EngineDraft, PrimaryView, SelectionItem},
+        state::{
+            AppState, AtomStyle, EngineDraft, PANEL_MIN_HEIGHT, PrimaryView,
+            SIDEBAR_MIN_WIDTH_PRIMARY, SIDEBAR_MIN_WIDTH_SECONDARY, SelectionItem, Side,
+            sidebar_max_width,
+        },
     },
 };
 
@@ -107,12 +111,14 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
 
     if state.ui.layout.show_primary_sidebar {
         let max_w = sidebar_max_width(ctx.viewport_rect().width());
+        // Clamp to the displayable range for this frame; the stored value is
+        // intentionally NOT written back so the user's desired width is
+        // preserved when the window is later widened again.
         let width = state
             .ui
             .layout
             .primary_sidebar_width
             .clamp(SIDEBAR_MIN_WIDTH_PRIMARY, max_w);
-        state.ui.layout.primary_sidebar_width = width;
         egui::Panel::left("primary_sidebar")
             .resizable(false)
             .exact_size(width)
@@ -135,7 +141,6 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .layout
             .secondary_sidebar_width
             .clamp(SIDEBAR_MIN_WIDTH_SECONDARY, max_w);
-        state.ui.layout.secondary_sidebar_width = width;
         egui::Panel::right("secondary_sidebar")
             .resizable(false)
             .exact_size(width)
@@ -184,25 +189,29 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             };
         let y = content_bottom - state.ui.layout.panel_height;
         let max_panel_height = (viewport_rect.height() * 0.6).max(160.0);
-        render_resize_divider(
+        // Inset the grab strip past the sidebar dividers (which now run full
+        // height at workspace_left / workspace_right) so the bottom corners
+        // aren't an ambiguous two-axis drag target.
+        match render_resize_divider(
             &ctx,
             "bottom_panel_resize",
             DividerKind::Horizontal,
-            // Inset the grab strip past the sidebar dividers (which now run full
-            // height at workspace_left / workspace_right) so the bottom corners
-            // aren't an ambiguous two-axis drag target.
             Rect::from_min_max(
                 egui::pos2(workspace_left + DIVIDER_GRAB_HALF_WIDTH, y - 4.0),
                 egui::pos2(workspace_right - DIVIDER_GRAB_HALF_WIDTH, y + 4.0),
             ),
             y,
-            &mut state.ui.layout.panel_height,
-            -1.0,
-            120.0,
-            max_panel_height,
-            180.0,
+            DividerConfig {
+                sign: -1.0,
+                min: PANEL_MIN_HEIGHT,
+                max: max_panel_height,
+            },
             &pal,
-        );
+        ) {
+            DividerEffect::Delta(d) => actions.push(AppAction::ResizePanel(d)),
+            DividerEffect::Reset => actions.push(AppAction::ResetPanel),
+            DividerEffect::None => {}
+        }
     }
 
     // Sidebar resize dividers — proximity-revealed, matching the bottom panel.
@@ -220,9 +229,10 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         let max_w = sidebar_max_width(vp.width());
         if state.ui.layout.show_primary_sidebar {
             // Draw the divider at the panel's rendered edge (see the note above the
-            // sidebar panels); drag still adjusts the user-chosen `primary_sidebar_width`.
+            // sidebar panels); drag emits AppAction::ResizeSidebar which the
+            // dispatcher applies to the stored `primary_sidebar_width`.
             let line_x = vp.left() + 52.0 + primary_rendered_w;
-            render_resize_divider(
+            match render_resize_divider(
                 &ctx,
                 "primary_sidebar_resize",
                 DividerKind::Vertical,
@@ -231,17 +241,21 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
                     egui::pos2(line_x + DIVIDER_GRAB_HALF_WIDTH, divider_bottom),
                 ),
                 line_x,
-                &mut state.ui.layout.primary_sidebar_width,
-                1.0,
-                SIDEBAR_MIN_WIDTH_PRIMARY,
-                max_w,
-                SIDEBAR_DEFAULT_WIDTH_PRIMARY,
+                DividerConfig {
+                    sign: 1.0,
+                    min: SIDEBAR_MIN_WIDTH_PRIMARY,
+                    max: max_w,
+                },
                 &pal,
-            );
+            ) {
+                DividerEffect::Delta(d) => actions.push(AppAction::ResizeSidebar(Side::Primary, d)),
+                DividerEffect::Reset => actions.push(AppAction::ResetSidebar(Side::Primary)),
+                DividerEffect::None => {}
+            }
         }
         if state.ui.layout.show_secondary_sidebar {
             let line_x = vp.right() - secondary_rendered_w;
-            render_resize_divider(
+            match render_resize_divider(
                 &ctx,
                 "secondary_sidebar_resize",
                 DividerKind::Vertical,
@@ -250,13 +264,19 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
                     egui::pos2(line_x + DIVIDER_GRAB_HALF_WIDTH, divider_bottom),
                 ),
                 line_x,
-                &mut state.ui.layout.secondary_sidebar_width,
-                -1.0,
-                SIDEBAR_MIN_WIDTH_SECONDARY,
-                max_w,
-                SIDEBAR_DEFAULT_WIDTH_SECONDARY,
+                DividerConfig {
+                    sign: -1.0,
+                    min: SIDEBAR_MIN_WIDTH_SECONDARY,
+                    max: max_w,
+                },
                 &pal,
-            );
+            ) {
+                DividerEffect::Delta(d) => {
+                    actions.push(AppAction::ResizeSidebar(Side::Secondary, d))
+                }
+                DividerEffect::Reset => actions.push(AppAction::ResetSidebar(Side::Secondary)),
+                DividerEffect::None => {}
+            }
         }
     }
 
@@ -443,18 +463,26 @@ const DIVIDER_ACTIVE_ALPHA: u8 = 220;
 /// Width of the fully-revealed bar (it thins to 1 px at rest).
 const DIVIDER_BAR_WIDTH: f32 = 2.0;
 
-const SIDEBAR_MIN_WIDTH_PRIMARY: f32 = 220.0;
-const SIDEBAR_MIN_WIDTH_SECONDARY: f32 = 240.0;
-const SIDEBAR_DEFAULT_WIDTH_PRIMARY: f32 = 240.0;
-const SIDEBAR_DEFAULT_WIDTH_SECONDARY: f32 = 320.0;
+/// Parameters for a proximity-revealed resize divider, grouped to keep the call
+/// sites readable. `sign` is `1.0` for left/top panels (drag away from center
+/// increases size) and `-1.0` for right/bottom panels. `min`/`max` are used to
+/// pre-clip drag deltas to the panel's full range; the dispatcher applies the
+/// authoritative clamp on the stored value.
+struct DividerConfig {
+    sign: f32,
+    min: f32,
+    max: f32,
+}
 
-/// Largest a sidebar may be dragged: half the window, capped at 480 px, but never
-/// below the *larger* of the two sidebar minimums. The floor must not drop below
-/// `SIDEBAR_MIN_WIDTH_SECONDARY`, or a narrow window makes `max_w < min` and the
-/// `width.clamp(min, max_w)` for the secondary sidebar panics (std clamp requires
-/// `min <= max`).
-fn sidebar_max_width(viewport_width: f32) -> f32 {
-    (viewport_width * 0.5).clamp(SIDEBAR_MIN_WIDTH_SECONDARY, 480.0)
+/// What a resize divider interaction produced this frame.
+enum DividerEffect {
+    /// No interaction.
+    None,
+    /// Drag: a signed delta in the "grows the panel" direction (`sign * screen_delta`),
+    /// pre-clipped to the panel's full range. The dispatcher clamps the stored value.
+    Delta(f32),
+    /// Double-click: reset to the panel's default (known to the caller/dispatcher).
+    Reset,
 }
 
 /// Interactive resize handle for a panel divider, Claude-style: a faint hairline
@@ -466,24 +494,17 @@ fn sidebar_max_width(viewport_width: f32) -> f32 {
 /// around the line, spanning its full length) — narrow so it never steals clicks
 /// from panel content or overlaps the scroll bar. `divider` is the on-screen
 /// position of the line (x for a vertical divider, y for a horizontal one) where
-/// the bar is painted. Dragging adjusts `value` (a panel width or height) along
-/// the divider's axis; `sign` flips it (`-1.0` for a right/bottom panel that
-/// grows as the divider moves toward it). Double-clicking resets `value` to
-/// `default`.
-#[allow(clippy::too_many_arguments)]
+/// the bar is painted. Returns a `DividerEffect` that the caller maps to an
+/// `AppAction`; the stored panel dimension is only mutated by the dispatcher.
 fn render_resize_divider(
     ctx: &egui::Context,
     id: &str,
     kind: DividerKind,
     hit_rect: Rect,
     divider: f32,
-    value: &mut f32,
-    sign: f32,
-    min: f32,
-    max: f32,
-    default: f32,
+    config: DividerConfig,
     pal: &crate::frontend::theme::Palette,
-) {
+) -> DividerEffect {
     // Proximity is a wider band than the grab strip: the bar reveals as the
     // pointer approaches, but only the slim strip senses drags/clicks.
     let proximity = ctx
@@ -500,6 +521,7 @@ fn render_resize_divider(
                     && p.x <= hit_rect.right()
             }
         });
+    let mut effect = DividerEffect::None;
     egui::Area::new(Id::new(id))
         .order(Order::Foreground)
         .fixed_pos(hit_rect.min)
@@ -513,13 +535,17 @@ fn render_resize_divider(
                 });
             }
             if response.double_clicked() {
-                *value = default;
+                effect = DividerEffect::Reset;
             } else if response.dragged() {
-                let delta = match kind {
+                let raw = match kind {
                     DividerKind::Vertical => response.drag_delta().x,
                     DividerKind::Horizontal => response.drag_delta().y,
                 };
-                *value = (*value + sign * delta).clamp(min, max);
+                // Pre-clip the delta to the panel's full range so a fast drag
+                // never produces an overshoot larger than the entire extent;
+                // the dispatcher applies the authoritative clamp on the stored value.
+                let range = config.max - config.min;
+                effect = DividerEffect::Delta((config.sign * raw).clamp(-range, range));
             }
             // Fade the bar in on approach / drag and out when the pointer leaves;
             // `animate_bool_with_time` self-requests repaints while in flight.
@@ -553,6 +579,7 @@ fn render_resize_divider(
             ui.painter()
                 .rect_filled(bar, egui::CornerRadius::same(1), color);
         });
+    effect
 }
 
 const CORE_BUTTON_CORNER_RADIUS: u8 = 4;

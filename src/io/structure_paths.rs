@@ -152,16 +152,14 @@ mod tests {
             }],
             UnitCell::from_parameters(10.0, 10.0, 10.0, 90.0, 90.0, 90.0),
         );
-        let save_path =
-            default_structure_save_path(&structure, Some(Path::new("tmp/cell.gro")));
+        let save_path = default_structure_save_path(&structure, Some(Path::new("tmp/cell.gro")));
 
         assert_eq!(save_path, PathBuf::from("cell.cif"));
     }
 
     #[test]
     fn path_with_format_extension_replaces_mismatched_suffix() {
-        let output =
-            path_with_format_extension(Path::new("tmp/example.xyz"), StructureFormat::Pdb);
+        let output = path_with_format_extension(Path::new("tmp/example.xyz"), StructureFormat::Pdb);
 
         assert_eq!(output, PathBuf::from("tmp/example.pdb"));
     }

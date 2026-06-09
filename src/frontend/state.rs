@@ -107,6 +107,21 @@ pub struct LayoutState {
     pub panel_height: f32,
 }
 
+pub const SIDEBAR_MIN_WIDTH_PRIMARY: f32 = 220.0;
+pub const SIDEBAR_MIN_WIDTH_SECONDARY: f32 = 240.0;
+pub const SIDEBAR_DEFAULT_WIDTH_PRIMARY: f32 = 240.0;
+pub const SIDEBAR_DEFAULT_WIDTH_SECONDARY: f32 = 320.0;
+pub const PANEL_MIN_HEIGHT: f32 = 120.0;
+pub const PANEL_DEFAULT_HEIGHT: f32 = 180.0;
+
+/// Maximum allowed width for either sidebar: half the window, capped at 480 px,
+/// but never below `SIDEBAR_MIN_WIDTH_SECONDARY` so `clamp(min, max_w)` is always
+/// valid (std clamp requires `min <= max`). Shared by the UI rendering pass and the
+/// resize dispatcher.
+pub fn sidebar_max_width(viewport_width: f32) -> f32 {
+    (viewport_width * 0.5).clamp(SIDEBAR_MIN_WIDTH_SECONDARY, 480.0)
+}
+
 impl Default for LayoutState {
     fn default() -> Self {
         Self {
@@ -115,11 +130,18 @@ impl Default for LayoutState {
             show_primary_sidebar: true,
             show_secondary_sidebar: false,
             show_panel: true,
-            primary_sidebar_width: 240.0,
-            secondary_sidebar_width: 320.0,
-            panel_height: 180.0,
+            primary_sidebar_width: SIDEBAR_DEFAULT_WIDTH_PRIMARY,
+            secondary_sidebar_width: SIDEBAR_DEFAULT_WIDTH_SECONDARY,
+            panel_height: PANEL_DEFAULT_HEIGHT,
         }
     }
+}
+
+/// Which sidebar a layout resize action targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Primary,
+    Secondary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
