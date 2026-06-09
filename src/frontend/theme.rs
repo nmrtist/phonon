@@ -29,7 +29,6 @@ pub struct Palette {
     pub window_backing: Color32,
     pub title_bar: Color32,
     pub status_bar: Color32,
-    pub activity_bar: Color32,
     pub sidebar: Color32,
     pub central: Color32,
     pub bottom_panel: Color32,
@@ -64,7 +63,6 @@ impl Palette {
             window_backing: Color32::from_rgb(245, 247, 249),
             title_bar: Color32::from_rgb(246, 248, 251),
             status_bar: Color32::from_rgb(229, 236, 244),
-            activity_bar: Color32::from_rgb(240, 243, 247),
             sidebar: Color32::from_rgb(252, 252, 253),
             central: Color32::from_rgb(245, 247, 249),
             bottom_panel: Color32::from_rgb(248, 249, 251),
@@ -95,7 +93,6 @@ impl Palette {
             window_backing: Color32::from_rgb(22, 22, 24),
             title_bar: Color32::from_rgb(30, 30, 33),
             status_bar: Color32::from_rgb(26, 26, 29),
-            activity_bar: Color32::from_rgb(28, 28, 31),
             sidebar: Color32::from_rgb(32, 32, 36),
             central: Color32::from_rgb(22, 22, 24),
             bottom_panel: Color32::from_rgb(28, 28, 31),
@@ -156,7 +153,7 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 /// macOS vibrancy material behind the window shows through. Tunable: lower means
 /// more see-through glass, higher means a more solid tint (and better text
 /// contrast over busy wallpapers).
-pub const GLASS_FILL_ALPHA: u8 = 125;
+pub const GLASS_FILL_ALPHA: u8 = 110;
 
 /// Fill for an app-drawn chrome surface (title bar, activity bar, sidebars,
 /// status bar). When `glass` is on, the opaque palette color is made

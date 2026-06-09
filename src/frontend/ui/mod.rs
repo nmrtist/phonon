@@ -84,15 +84,9 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         )
         .show_inside(ui, |ui| render_status_bar(state, ui));
 
-    egui::Panel::left("activity_bar")
-        .exact_size(52.0)
-        .resizable(false)
-        .frame(
-            Frame::default()
-                .fill(crate::frontend::theme::chrome_fill(pal.activity_bar, glass))
-                .inner_margin(Margin::symmetric(6, 10)),
-        )
-        .show_inside(ui, |ui| render_activity_bar(state, ui));
+    // No separate vertical activity rail (Xcode-style): the primary-view switcher
+    // lives as a compact icon row at the top of the single left sidebar (see
+    // `render_primary_sidebar`), and the title bar carries the show/hide toggle.
 
     // Sidebars are fixed-width panels driven by our own proximity-revealed
     // resize dividers (wired after the central panel; see `render_resize_divider`).
@@ -179,7 +173,6 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         // Use the panels' *rendered* widths (see the note above the sidebar panels)
         // so the bottom-panel divider stays flush with the central column.
         let workspace_left = viewport_rect.left()
-            + 52.0
             + if state.ui.layout.show_primary_sidebar {
                 primary_rendered_w
             } else {
@@ -235,7 +228,7 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             // Draw the divider at the panel's rendered edge (see the note above the
             // sidebar panels); drag emits AppAction::ResizeSidebar which the
             // dispatcher applies to the stored `primary_sidebar_width`.
-            let line_x = vp.left() + 52.0 + primary_rendered_w;
+            let line_x = vp.left() + primary_rendered_w;
             match render_resize_divider(
                 &ctx,
                 "primary_sidebar_resize",
@@ -613,6 +606,30 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
                 .color(title_color),
         );
 
+        // Sidebar show/hide toggle (Xcode/Finder-style). With no vertical activity
+        // rail, this is the only way to reopen a hidden sidebar — so it lives in the
+        // title bar, always reachable. On macOS, sit just right of the traffic lights.
+        #[cfg(target_os = "macos")]
+        ui.add_space(64.0);
+        {
+            let shown = state.ui.layout.show_primary_sidebar;
+            if with_core_button_style(ui, shown, |ui| {
+                ui.add_sized(
+                    [28.0, 24.0],
+                    Button::new(
+                        RichText::new(egui_phosphor::regular::SIDEBAR_SIMPLE)
+                            .color(core_button_text_color(&pal, shown)),
+                    )
+                    .selected(shown),
+                )
+            })
+            .on_hover_text(if shown { "Hide sidebar" } else { "Show sidebar" })
+            .clicked()
+            {
+                state.ui.layout.show_primary_sidebar = !shown;
+            }
+        }
+
         if show_inline_menus {
             with_core_button_style(ui, false, |ui| {
                 ui.menu_button(RichText::new("File").color(title_color), |ui| {
@@ -891,35 +908,6 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
     }
 }
 
-fn render_activity_bar(state: &mut AppState, ui: &mut egui::Ui) {
-    let pal = crate::frontend::theme::palette(ui);
-    ui.vertical_centered(|ui| {
-        for view in PrimaryView::all() {
-            let selected = state.ui.layout.active_primary_view == *view;
-            let response = with_core_button_style(ui, selected, |ui| {
-                ui.add_sized(
-                    [36.0, 36.0],
-                    Button::new(
-                        RichText::new(view.icon())
-                            .strong()
-                            .color(activity_icon_color(*view, &pal, selected)),
-                    )
-                    .selected(selected),
-                )
-            })
-            .on_hover_text(view.label());
-            if response.clicked() {
-                if selected && state.ui.layout.show_primary_sidebar {
-                    state.ui.layout.show_primary_sidebar = false;
-                } else {
-                    state.ui.layout.active_primary_view = *view;
-                    state.ui.layout.show_primary_sidebar = true;
-                }
-            }
-        }
-    });
-}
-
 /// Render sidebar content pinned to the panel's exact width.
 ///
 /// `Panel::exact_size` clips the panel *fill* to the requested width, but a child
@@ -947,35 +935,29 @@ fn render_pinned(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 
 fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let pal = crate::frontend::theme::palette(ui);
+    // Xcode-style primary-view switcher: a compact row of icon buttons at the top
+    // of the single sidebar (replaces the old vertical activity rail). The active
+    // view is accent-tinted and hovering shows its label. Hiding the sidebar is the
+    // title bar toggle's job now, so there's no in-sidebar caret.
     ui.horizontal(|ui| {
-        let btn_w = 28.0 + ui.spacing().item_spacing.x;
-        let heading_w = (ui.available_width() - btn_w).max(0.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(heading_w, 28.0), Sense::hover());
-        let mut heading_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect)
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        heading_ui.add(
-            egui::Label::new(RichText::new(state.ui.layout.active_primary_view.label()).heading())
-                .truncate(),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if with_core_button_style(ui, false, |ui| {
+        for view in PrimaryView::all() {
+            let selected = state.ui.layout.active_primary_view == *view;
+            let response = with_core_button_style(ui, selected, |ui| {
                 ui.add_sized(
-                    [28.0, 28.0],
+                    [32.0, 26.0],
                     Button::new(
-                        RichText::new(egui_phosphor::regular::CARET_LEFT)
-                            .color(core_button_text_color(&pal, false)),
-                    ),
+                        RichText::new(view.icon())
+                            .strong()
+                            .color(activity_icon_color(*view, &pal, selected)),
+                    )
+                    .selected(selected),
                 )
             })
-            .on_hover_text("Hide sidebar")
-            .clicked()
-            {
-                state.ui.layout.show_primary_sidebar = false;
+            .on_hover_text(view.label());
+            if response.clicked() {
+                state.ui.layout.active_primary_view = *view;
             }
-        });
+        }
     });
     ui.separator();
 
