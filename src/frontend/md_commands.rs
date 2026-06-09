@@ -220,7 +220,7 @@ fn md_build(state: &mut AppState, args: &[String]) -> Result<String> {
             let solute = structure.clone();
             let save_path = structure_io::default_structure_save_path(&structure, None);
             let entry_id = state.entries.add_entry(structure, None, save_path);
-            activate_entry(state, entry_id);
+            state.show_entry(entry_id);
             record_cli_task_result_entry(state, task_run_id, entry_id)?;
 
             topology.save(&run_dir.join(MD_TOPOLOGY_FILE))?;
@@ -260,7 +260,7 @@ fn md_build(state: &mut AppState, args: &[String]) -> Result<String> {
         let solute = structure.clone();
         let save_path = structure_io::default_structure_save_path(&structure, None);
         let entry_id = state.entries.add_entry(structure, None, save_path);
-        activate_entry(state, entry_id);
+        state.show_entry(entry_id);
         record_cli_task_result_entry(state, task_run_id, entry_id)?;
 
         let topology = MdTopology::from_structure(state.structure())?;
@@ -428,7 +428,7 @@ fn md_simulate(state: &mut AppState, args: &[String]) -> Result<String> {
         let entry_id = state
             .entries
             .add_entry(production.structure.clone(), None, save_path);
-        activate_entry(state, entry_id);
+        state.show_entry(entry_id);
         // Mark the entry as an MD-run output (provenance badge + playback gating),
         // mirroring the GUI run path.
         let project_root = state
@@ -594,7 +594,7 @@ fn md_run(state: &mut AppState, args: &[String]) -> Result<String> {
         let entry_id = state
             .entries
             .add_entry(production.structure.clone(), None, save_path);
-        activate_entry(state, entry_id);
+        state.show_entry(entry_id);
         let project_root = state
             .workspace
             .project()
@@ -838,16 +838,6 @@ fn finish_cli_task(
             Err(error)
         }
     }
-}
-
-fn activate_entry(state: &mut AppState, entry_id: u64) {
-    state.save_viewport_for_active_entry();
-    state.entries.activate_entry(entry_id);
-    state.ensure_entry_loaded(entry_id);
-    state.history.set_active_entry(Some(entry_id));
-    state.ui.entry_list.selected_entry_ids.clear();
-    state.ui.entry_list.selected_entry_ids.insert(entry_id);
-    state.load_viewport_for_active_entry();
 }
 
 #[cfg(test)]
