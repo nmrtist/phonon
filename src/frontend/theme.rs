@@ -58,25 +58,28 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// Warm ivory light theme (Claude Desktop family): neutral surfaces sit on
+    /// a `#faf9f5` base with warm grays for text and hairlines, while accents
+    /// and selection stay macOS system blue.
     pub const fn light() -> Self {
         Self {
-            window_backing: Color32::from_rgb(245, 247, 249),
-            title_bar: Color32::from_rgb(246, 248, 251),
-            status_bar: Color32::from_rgb(229, 236, 244),
-            sidebar: Color32::from_rgb(252, 252, 253),
-            central: Color32::from_rgb(245, 247, 249),
-            bottom_panel: Color32::from_rgb(248, 249, 251),
-            viewport_bg: Color32::from_rgb(245, 247, 249),
-            text_primary: Color32::from_rgb(32, 37, 43),
-            text_strong: Color32::from_rgb(18, 22, 30),
-            text_muted: Color32::from_rgb(92, 100, 112),
-            text_tertiary: Color32::from_rgb(120, 128, 138),
-            hairline: Color32::from_rgb(226, 232, 240),
-            item_fill: Color32::from_rgb(249, 251, 253),
-            item_fill_hover: Color32::from_rgb(242, 247, 252),
-            item_fill_active: Color32::from_rgb(221, 226, 233),
-            selection_fill: Color32::from_rgb(216, 223, 233),
-            neutral_tint: Color32::from_rgb(64, 70, 82),
+            window_backing: Color32::from_rgb(250, 249, 245),
+            title_bar: Color32::from_rgb(250, 249, 245),
+            status_bar: Color32::from_rgb(240, 238, 231),
+            sidebar: Color32::from_rgb(245, 244, 237),
+            central: Color32::from_rgb(250, 249, 245),
+            bottom_panel: Color32::from_rgb(247, 246, 240),
+            viewport_bg: Color32::from_rgb(250, 249, 245),
+            text_primary: Color32::from_rgb(54, 51, 44),
+            text_strong: Color32::from_rgb(31, 30, 27),
+            text_muted: Color32::from_rgb(115, 112, 103),
+            text_tertiary: Color32::from_rgb(143, 140, 130),
+            hairline: Color32::from_rgb(231, 228, 219),
+            item_fill: Color32::WHITE,
+            item_fill_hover: Color32::from_rgb(248, 246, 240),
+            item_fill_active: Color32::from_rgb(232, 229, 220),
+            selection_fill: Color32::from_rgb(213, 222, 235),
+            neutral_tint: Color32::from_rgb(70, 66, 56),
             accent: Color32::from_rgb(0, 122, 255),
             selection_blue_tint: Color32::from_rgb(54, 97, 164),
             status_blue: Color32::from_rgb(120, 146, 184),
@@ -86,27 +89,27 @@ impl Palette {
         }
     }
 
-    /// Near-black ("deep") dark theme, slightly cool to echo the light theme's
-    /// blue tint. Panels step up in lightness from the window backing.
+    /// Warm charcoal dark theme (Claude Desktop's `#262624` family). Panels
+    /// step up in lightness from the window backing; blue accents unchanged.
     pub const fn dark() -> Self {
         Self {
-            window_backing: Color32::from_rgb(22, 22, 24),
-            title_bar: Color32::from_rgb(30, 30, 33),
-            status_bar: Color32::from_rgb(26, 26, 29),
-            sidebar: Color32::from_rgb(32, 32, 36),
-            central: Color32::from_rgb(22, 22, 24),
-            bottom_panel: Color32::from_rgb(28, 28, 31),
-            viewport_bg: Color32::from_rgb(18, 18, 20),
-            text_primary: Color32::from_rgb(228, 231, 236),
-            text_strong: Color32::from_rgb(244, 246, 249),
-            text_muted: Color32::from_rgb(150, 157, 167),
-            text_tertiary: Color32::from_rgb(120, 127, 137),
-            hairline: Color32::from_rgb(52, 54, 60),
-            item_fill: Color32::from_rgb(40, 40, 45),
-            item_fill_hover: Color32::from_rgb(50, 50, 56),
-            item_fill_active: Color32::from_rgb(60, 60, 67),
+            window_backing: Color32::from_rgb(33, 33, 31),
+            title_bar: Color32::from_rgb(42, 41, 38),
+            status_bar: Color32::from_rgb(37, 36, 34),
+            sidebar: Color32::from_rgb(44, 43, 40),
+            central: Color32::from_rgb(33, 33, 31),
+            bottom_panel: Color32::from_rgb(40, 39, 36),
+            viewport_bg: Color32::from_rgb(28, 28, 26),
+            text_primary: Color32::from_rgb(232, 230, 224),
+            text_strong: Color32::from_rgb(247, 245, 240),
+            text_muted: Color32::from_rgb(160, 156, 147),
+            text_tertiary: Color32::from_rgb(127, 124, 116),
+            hairline: Color32::from_rgb(58, 57, 52),
+            item_fill: Color32::from_rgb(48, 47, 44),
+            item_fill_hover: Color32::from_rgb(58, 57, 53),
+            item_fill_active: Color32::from_rgb(70, 68, 63),
             selection_fill: Color32::from_rgb(44, 58, 82),
-            neutral_tint: Color32::from_rgb(210, 215, 222),
+            neutral_tint: Color32::from_rgb(222, 219, 212),
             accent: Color32::from_rgb(10, 132, 255),
             selection_blue_tint: Color32::from_rgb(94, 145, 220),
             status_blue: Color32::from_rgb(126, 158, 200),
@@ -137,6 +140,20 @@ impl Palette {
 /// The palette for the theme egui currently resolves for this `Ui`.
 pub fn palette(ui: &egui::Ui) -> Palette {
     Palette::for_dark_mode(ui.visuals().dark_mode)
+}
+
+/// Apple-style corner-radius scale. Every rounded rect in the app draws from
+/// these four steps; nested rounding follows the concentric rule (inner radius
+/// = container radius − inset) so stacked corners share a center.
+pub mod radius {
+    /// Tiny inline chips/badges (e.g. the "MD" origin chip on entry rows).
+    pub const CHIP: u8 = 4;
+    /// Standard controls: buttons, inputs, list-row highlights, menu items.
+    pub const CONTROL: u8 = 6;
+    /// Cards and menus: task cards, recent-project rows, popups.
+    pub const CARD: u8 = 8;
+    /// Large containers: window corners, big call-to-action buttons.
+    pub const LARGE: u8 = 10;
 }
 
 /// Linear blend between two colors (`t` = 0 → `a`, `t` = 1 → `b`), done in
@@ -243,6 +260,23 @@ fn build_visuals(dark: bool) -> Visuals {
         Visuals::light()
     };
 
+    // Re-base every default egui surface on the warm palette. egui's stock
+    // `Visuals::light()/dark()` fills are cool grays; left untouched they leak
+    // through wherever a widget isn't explicitly painted (TextEdit backing,
+    // popups, plain buttons) and read as cold patches on the ivory/charcoal
+    // surfaces.
+    visuals.panel_fill = pal.central;
+    visuals.window_fill = pal.central;
+    visuals.extreme_bg_color = pal.item_fill;
+    visuals.faint_bg_color = pal.item_fill_hover;
+    visuals.widgets.noninteractive.bg_fill = pal.central;
+    visuals.widgets.noninteractive.fg_stroke.color = pal.text_primary;
+    visuals.widgets.inactive.weak_bg_fill = pal.item_fill;
+    visuals.widgets.inactive.bg_fill = pal.item_fill;
+    visuals.widgets.inactive.fg_stroke.color = pal.text_primary;
+    visuals.widgets.open.weak_bg_fill = pal.item_fill_active;
+    visuals.widgets.open.bg_fill = pal.item_fill_active;
+
     // Selection is a soft, *filled*, rounded highlight — not a hard outline.
     // The stroke width is 0 (so no outline is drawn), but its *color* must stay
     // visible: egui uses `selection.stroke.color` as the text color of selected
@@ -253,7 +287,7 @@ fn build_visuals(dark: bool) -> Visuals {
     visuals.hyperlink_color = pal.accent;
 
     // Controls have gently rounded corners. egui defaults to 2-3px; nudge up.
-    let control = CornerRadius::same(6);
+    let control = CornerRadius::same(radius::CONTROL);
     for widget in [
         &mut visuals.widgets.noninteractive,
         &mut visuals.widgets.inactive,
@@ -263,8 +297,8 @@ fn build_visuals(dark: bool) -> Visuals {
     ] {
         widget.corner_radius = control;
     }
-    visuals.window_corner_radius = CornerRadius::same(10);
-    visuals.menu_corner_radius = CornerRadius::same(8);
+    visuals.window_corner_radius = CornerRadius::same(radius::LARGE);
+    visuals.menu_corner_radius = CornerRadius::same(radius::CARD);
 
     // Inputs keep a faint resting hairline, but hover and press become a soft
     // *filled* block with no outline, rather than the hard wireframe egui draws

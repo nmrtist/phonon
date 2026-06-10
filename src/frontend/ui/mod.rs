@@ -34,7 +34,7 @@ use workspace::render_workspace;
 /// macOS uses the native window frame, which owns resize, the squircle corners,
 /// the border, and the shadow, so the app-drawn chrome is skipped there.
 #[cfg(not(target_os = "macos"))]
-const WINDOW_CORNER_RADIUS: u8 = 10;
+const WINDOW_CORNER_RADIUS: u8 = crate::frontend::theme::radius::LARGE;
 
 pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let ctx = ui.ctx().clone();
@@ -635,7 +635,7 @@ fn render_resize_divider(
     effect
 }
 
-const CORE_BUTTON_CORNER_RADIUS: u8 = 4;
+const CORE_BUTTON_CORNER_RADIUS: u8 = crate::frontend::theme::radius::CONTROL;
 const CORE_BUTTON_HOVER_ALPHA: u8 = 26;
 const CORE_BUTTON_SELECTED_ALPHA: u8 = 44;
 const CORE_BUTTON_SELECTED_HOVER_ALPHA: u8 = 58;
@@ -1114,10 +1114,15 @@ fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
         } else {
             egui::Color32::WHITE
         };
+        // Concentric corners: the track's radius is the segment card's radius
+        // plus the 3px inner margin, so both curves share a center.
+        const SEGMENT_INSET: u8 = 3;
         Frame::default()
             .fill(pal.neutral_overlay(if dark { 26 } else { 14 }))
-            .corner_radius(egui::CornerRadius::same(9))
-            .inner_margin(Margin::same(3))
+            .corner_radius(egui::CornerRadius::same(
+                crate::frontend::theme::radius::CONTROL + SEGMENT_INSET,
+            ))
+            .inner_margin(Margin::same(SEGMENT_INSET as i8))
             .show(ui, |ui| {
                 let seg_w = (ui.available_width() / PrimaryView::all().len() as f32).floor();
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -1151,20 +1156,19 @@ fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
                         }
                         let painter = ui.painter();
                         let galley = painter.layout_job(job);
+                        let segment_radius = egui::CornerRadius::same(
+                            crate::frontend::theme::radius::CONTROL,
+                        );
                         if selected {
                             painter.rect(
                                 rect,
-                                egui::CornerRadius::same(7),
+                                segment_radius,
                                 card_fill,
                                 Stroke::new(1.0, pal.hairline),
                                 egui::StrokeKind::Inside,
                             );
                         } else if response.hovered() {
-                            painter.rect_filled(
-                                rect,
-                                egui::CornerRadius::same(7),
-                                pal.neutral_overlay(14),
-                            );
+                            painter.rect_filled(rect, segment_radius, pal.neutral_overlay(14));
                         }
                         let pos = rect.center() - galley.size() / 2.0;
                         painter.galley(pos, galley, pal.text_primary);
@@ -1519,8 +1523,11 @@ fn render_group_header(
         egui::Color32::TRANSPARENT
     };
     if bg != egui::Color32::TRANSPARENT {
-        ui.painter()
-            .rect_filled(row_rect.shrink2(egui::vec2(4.0, 1.0)), 6.0, bg);
+        ui.painter().rect_filled(
+            row_rect.shrink2(egui::vec2(4.0, 1.0)),
+            f32::from(crate::frontend::theme::radius::CONTROL),
+            bg,
+        );
     }
 
     // Paint the caret marker and folder icon.
@@ -1863,8 +1870,11 @@ fn render_entry_list_item(
             pal.text_muted
         };
 
-        ui.painter()
-            .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 6.0, bg_fill);
+        ui.painter().rect_filled(
+            rect.shrink2(egui::vec2(4.0, 1.0)),
+            f32::from(crate::frontend::theme::radius::CONTROL),
+            bg_fill,
+        );
 
         let text_rect = rect.shrink2(egui::vec2(6.0, 0.0));
 
@@ -1917,8 +1927,11 @@ fn render_entry_list_item(
                 ),
                 chip_size,
             );
-            ui.painter()
-                .rect_filled(chip_rect, 4.0, pal.blue_overlay(45));
+            ui.painter().rect_filled(
+                chip_rect,
+                f32::from(crate::frontend::theme::radius::CHIP),
+                pal.blue_overlay(45),
+            );
             let chip_pos = egui::pos2(
                 chip_rect.center().x - chip_galley.size().x / 2.0,
                 chip_rect.center().y - chip_galley.size().y / 2.0,
@@ -2128,9 +2141,11 @@ fn render_tasks_view(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                 if !collapsed {
                     ui.add_space(2.0);
                     for controller in controllers {
+                        let card_radius = crate::frontend::theme::radius::CARD;
                         let response = Frame::default()
                             .fill(pal.item_fill)
                             .stroke(Stroke::NONE)
+                            .corner_radius(egui::CornerRadius::same(card_radius))
                             .inner_margin(Margin::symmetric(10, 7))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
@@ -2140,11 +2155,14 @@ fn render_tasks_view(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<
                             .interact(Sense::click())
                             .on_hover_text(controller.description);
                         if response.hovered() {
-                            ui.painter()
-                                .rect_filled(response.rect, 6.0, pal.blue_overlay(18));
+                            ui.painter().rect_filled(
+                                response.rect,
+                                f32::from(card_radius),
+                                pal.blue_overlay(18),
+                            );
                             ui.painter().rect_stroke(
                                 response.rect,
-                                6.0,
+                                f32::from(card_radius),
                                 Stroke::new(1.0, pal.blue_overlay(72)),
                                 egui::StrokeKind::Inside,
                             );

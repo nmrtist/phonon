@@ -73,12 +73,14 @@ pub fn component_preview(
             Vec2::new(preview_width, COMPONENT_PREVIEW_CANVAS_HEIGHT),
             Sense::hover(),
         );
+        let pal = crate::frontend::theme::palette(ui);
+        let canvas_radius = f32::from(crate::frontend::theme::radius::CONTROL);
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, Color32::from_rgb(248, 249, 250));
+        painter.rect_filled(rect, canvas_radius, pal.item_fill);
         painter.rect_stroke(
             rect,
-            4.0,
-            Stroke::new(1.0, Color32::from_rgb(205, 210, 216)),
+            canvas_radius,
+            Stroke::new(1.0, pal.hairline),
             egui::StrokeKind::Inside,
         );
 
