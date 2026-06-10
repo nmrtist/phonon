@@ -47,6 +47,16 @@ impl PrimaryView {
             Self::Settings => "Settings",
         }
     }
+
+    /// Compact label shown inside the sidebar's segmented view switcher, where
+    /// each segment is only a third of the sidebar width.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::EntryList => "Entries",
+            Self::Tasks => "Tasks",
+            Self::Settings => "Settings",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

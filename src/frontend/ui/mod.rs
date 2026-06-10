@@ -662,32 +662,27 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
                 .color(title_color),
         );
 
-        // Sidebar show/hide toggle (Xcode/Finder-style). With no vertical activity
-        // rail, this is the only way to reopen a hidden sidebar — so it lives in the
-        // title bar, always reachable. On macOS the spacer clears the native traffic
-        // lights, but only while the sidebar is hidden (title bar at full width);
-        // with the full-height sidebar visible, the lights overlay the sidebar and
-        // the title bar starts at its right edge.
-        #[cfg(target_os = "macos")]
+        // Sidebar toggle, Claude Desktop convention: while the sidebar is
+        // visible its own header strip carries the hide button, so the title
+        // bar stays clean; when hidden, the title bar spans the full width and
+        // carries the only way to bring the sidebar back — right of the macOS
+        // traffic lights, which the spacer clears.
         if !state.ui.layout.show_primary_sidebar {
+            #[cfg(target_os = "macos")]
             ui.add_space(MACOS_TRAFFIC_LIGHTS_WIDTH - 8.0);
-        }
-        {
-            let shown = state.ui.layout.show_primary_sidebar;
-            if with_core_button_style(ui, shown, |ui| {
+            if with_core_button_style(ui, false, |ui| {
                 ui.add_sized(
                     [28.0, 24.0],
                     Button::new(
                         RichText::new(egui_phosphor::regular::SIDEBAR_SIMPLE)
-                            .color(core_button_text_color(&pal, shown)),
-                    )
-                    .selected(shown),
+                            .color(core_button_text_color(&pal, false)),
+                    ),
                 )
             })
-            .on_hover_text(if shown { "Hide sidebar" } else { "Show sidebar" })
+            .on_hover_text("Show sidebar")
             .clicked()
             {
-                state.ui.layout.show_primary_sidebar = !shown;
+                state.ui.layout.show_primary_sidebar = true;
             }
         }
 
@@ -869,12 +864,13 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
 
     // Width of the non-draggable leading cluster, measured from the title bar's
     // own left edge (which with the full-height sidebar visible is the sidebar's
-    // right edge, not the window's): inline menus, or the sidebar toggle plus —
-    // when the sidebar is hidden — the macOS traffic-light spacer.
+    // right edge, not the window's): inline menus, or — when the sidebar is
+    // hidden — the macOS traffic-light spacer plus the show-sidebar toggle.
+    // With the sidebar visible the title bar carries no leading controls.
     let left_reserved_width = if show_inline_menus {
         300.0
     } else if state.ui.layout.show_primary_sidebar {
-        48.0
+        12.0
     } else {
         96.0
     };
@@ -997,7 +993,15 @@ fn render_pinned(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
             .max_rect(rect)
             .layout(Layout::top_down(Align::Min)),
     );
-    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    // Clip to the content rect, then let painting bleed into the panel's 10px
+    // right margin (up to the panel's own edge) so the edge-pinned scroll bar
+    // (see `render_primary_sidebar`'s negative `bar_outer_margin`) isn't
+    // clipped away. Expanded AFTER the intersection — the parent clip can be
+    // as tight as the content rect, which would cancel the expansion. Layout
+    // is still pinned to `rect`, so this stays cosmetic.
+    let mut clip = rect.intersect(ui.clip_rect());
+    clip.max.x += 10.0;
+    child.set_clip_rect(clip);
     add(&mut child);
     ui.advance_cursor_after_rect(rect);
 }
@@ -1014,11 +1018,19 @@ const MACOS_TRAFFIC_LIGHTS_WIDTH: f32 = 72.0;
 
 fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let pal = crate::frontend::theme::palette(ui);
-    // Header strip: the Xcode-style primary-view switcher (compact icon row;
-    // the active view is accent-tinted, hovering shows its label). The sidebar
-    // panel has no top margin, so this strip starts at the window's top edge —
-    // on macOS the native traffic lights overlay its left end. Hiding the
-    // sidebar is the title bar toggle's job, so there's no in-sidebar caret.
+    // Pin scroll bars to the panel's edge, macOS source-list style: pull them
+    // out through the sidebar's 10px right margin (bar right edge lands 2px
+    // shy of the divider hairline), so the bar and the divider don't read as
+    // two parallel bars with a dead gap between them. Inherited by every
+    // ScrollArea in the sidebar's views.
+    ui.spacing_mut().scroll.bar_outer_margin = -8.0;
+    // Header strip (Claude Desktop-style): just the native traffic lights and
+    // the sidebar-hide toggle — the view switcher lives in the segmented
+    // control below, not crammed beside the lights. The sidebar panel has no
+    // top margin, so the strip starts at the window's top edge; on macOS the
+    // traffic lights overlay its left end. No hairline: the sidebar reads as
+    // one continuous surface, with the toolbar's separator confined to the
+    // content area.
     let strip_rect = Rect::from_min_size(
         ui.max_rect().min,
         egui::vec2(ui.max_rect().width(), SIDEBAR_HEADER_HEIGHT),
@@ -1032,47 +1044,45 @@ fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
                 // margin already supplies part of the inset.
                 #[cfg(target_os = "macos")]
                 ui.add_space(MACOS_TRAFFIC_LIGHTS_WIDTH - 10.0);
-                for view in PrimaryView::all() {
-                    let selected = state.ui.layout.active_primary_view == *view;
-                    let response = with_core_button_style(ui, selected, |ui| {
-                        ui.add_sized(
-                            [32.0, 26.0],
-                            Button::new(
-                                RichText::new(view.icon())
-                                    .strong()
-                                    .color(activity_icon_color(*view, &pal, selected)),
-                            )
-                            .selected(selected),
-                        )
-                    })
-                    .on_hover_text(view.label());
-                    if response.clicked() {
-                        state.ui.layout.active_primary_view = *view;
-                    }
+                if with_core_button_style(ui, false, |ui| {
+                    ui.add_sized(
+                        [28.0, 24.0],
+                        Button::new(
+                            RichText::new(egui_phosphor::regular::SIDEBAR_SIMPLE)
+                                .color(core_button_text_color(&pal, false)),
+                        ),
+                    )
+                })
+                .on_hover_text("Hide sidebar")
+                .clicked()
+                {
+                    state.ui.layout.show_primary_sidebar = false;
                 }
                 ui.min_rect()
             },
         )
         .inner;
 
-    // Hairline at the strip's bottom edge, level with the title bar's own
-    // bottom separator so the line runs continuously across the window.
-    ui.painter().hline(
-        strip_rect.x_range(),
-        strip_rect.bottom(),
-        ui.visuals().widgets.noninteractive.bg_stroke,
-    );
-
     // The strip's blank areas drag the window, like the title bar (on macOS the
     // leading zone sits under the traffic lights, whose native buttons consume
     // their own clicks — the gaps still drag, matching native sidebars). The
-    // zones exclude the icon cluster so the buttons keep their clicks.
+    // zones exclude the toggle button so it keeps its clicks.
     let leading = Rect::from_min_max(
         strip_rect.min,
-        egui::pos2(icons_rect.left().clamp(strip_rect.left(), strip_rect.right()), strip_rect.bottom()),
+        egui::pos2(
+            icons_rect
+                .left()
+                .clamp(strip_rect.left(), strip_rect.right()),
+            strip_rect.bottom(),
+        ),
     );
     let trailing = Rect::from_min_max(
-        egui::pos2(icons_rect.right().clamp(strip_rect.left(), strip_rect.right()), strip_rect.top()),
+        egui::pos2(
+            icons_rect
+                .right()
+                .clamp(strip_rect.left(), strip_rect.right()),
+            strip_rect.top(),
+        ),
         strip_rect.max,
     );
     for (id, rect) in [
@@ -1090,6 +1100,83 @@ fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut
             let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
             ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
+    }
+    ui.add_space(6.0);
+
+    // Segmented view switcher, Claude Desktop-style: a rounded low-contrast
+    // track holding one equal-width segment per primary view. The active
+    // segment reads as a raised card (white in light mode) carrying its icon
+    // and a compact label; inactive segments are muted icon-only.
+    {
+        let dark = ui.visuals().dark_mode;
+        let card_fill = if dark {
+            pal.item_fill_active
+        } else {
+            egui::Color32::WHITE
+        };
+        Frame::default()
+            .fill(pal.neutral_overlay(if dark { 26 } else { 14 }))
+            .corner_radius(egui::CornerRadius::same(9))
+            .inner_margin(Margin::same(3))
+            .show(ui, |ui| {
+                let seg_w = (ui.available_width() / PrimaryView::all().len() as f32).floor();
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.horizontal(|ui| {
+                    for view in PrimaryView::all() {
+                        let selected = state.ui.layout.active_primary_view == *view;
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(seg_w, 28.0), Sense::click());
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(
+                            view.icon(),
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::proportional(14.0),
+                                color: activity_icon_color(*view, &pal, selected),
+                                valign: Align::Center,
+                                ..Default::default()
+                            },
+                        );
+                        if selected {
+                            job.append(
+                                view.short_label(),
+                                6.0,
+                                egui::TextFormat {
+                                    font_id: egui::FontId::proportional(12.5),
+                                    color: pal.text_strong,
+                                    valign: Align::Center,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        let painter = ui.painter();
+                        let galley = painter.layout_job(job);
+                        if selected {
+                            painter.rect(
+                                rect,
+                                egui::CornerRadius::same(7),
+                                card_fill,
+                                Stroke::new(1.0, pal.hairline),
+                                egui::StrokeKind::Inside,
+                            );
+                        } else if response.hovered() {
+                            painter.rect_filled(
+                                rect,
+                                egui::CornerRadius::same(7),
+                                pal.neutral_overlay(14),
+                            );
+                        }
+                        let pos = rect.center() - galley.size() / 2.0;
+                        painter.galley(pos, galley, pal.text_primary);
+                        if !selected {
+                            response.clone().on_hover_text(view.label());
+                        }
+                        if response.clicked() {
+                            state.ui.layout.active_primary_view = *view;
+                        }
+                    }
+                });
+            });
     }
     ui.add_space(8.0);
 
