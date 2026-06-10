@@ -44,6 +44,11 @@ pub struct Palette {
     pub item_fill: Color32,
     pub item_fill_hover: Color32,
     pub item_fill_active: Color32,
+    /// Backing for text inputs (TextEdit, search fields). Distinct from
+    /// `item_fill`: in dark mode inputs must sit clearly *lighter* than the
+    /// surrounding panel (a card-dark input reads as a black hole), while in
+    /// light mode both are white.
+    pub input_fill: Color32,
     pub selection_fill: Color32,
     /// Ink used to build low-alpha neutral overlays; dark in light mode and
     /// light in dark mode so hovers read as a highlight either way.
@@ -78,6 +83,7 @@ impl Palette {
             item_fill: Color32::WHITE,
             item_fill_hover: Color32::from_rgb(246, 245, 241),
             item_fill_active: Color32::from_rgb(231, 229, 224),
+            input_fill: Color32::WHITE,
             selection_fill: Color32::from_rgb(213, 222, 235),
             neutral_tint: Color32::from_rgb(70, 66, 56),
             accent: Color32::from_rgb(0, 122, 255),
@@ -106,8 +112,9 @@ impl Palette {
             text_tertiary: Color32::from_rgb(127, 124, 116),
             hairline: Color32::from_rgb(58, 57, 52),
             item_fill: Color32::from_rgb(48, 47, 44),
-            item_fill_hover: Color32::from_rgb(58, 57, 53),
-            item_fill_active: Color32::from_rgb(70, 68, 63),
+            item_fill_hover: Color32::from_rgb(66, 65, 60),
+            item_fill_active: Color32::from_rgb(80, 78, 72),
+            input_fill: Color32::from_rgb(58, 57, 53),
             selection_fill: Color32::from_rgb(44, 58, 82),
             neutral_tint: Color32::from_rgb(222, 219, 212),
             accent: Color32::from_rgb(10, 132, 255),
@@ -267,7 +274,7 @@ fn build_visuals(dark: bool) -> Visuals {
     // surfaces.
     visuals.panel_fill = pal.central;
     visuals.window_fill = pal.central;
-    visuals.extreme_bg_color = pal.item_fill;
+    visuals.extreme_bg_color = pal.input_fill;
     visuals.faint_bg_color = pal.item_fill_hover;
     visuals.widgets.noninteractive.bg_fill = pal.central;
     visuals.widgets.noninteractive.fg_stroke.color = pal.text_primary;
