@@ -267,6 +267,11 @@ impl eframe::App for PhononApp {
         // so toggling the preference or the OS "Reduce Transparency" setting
         // takes effect live.
         self.state.ui.glass_active = crate::frontend::glass::glass_active(self.state.config.glass);
+        self.state.ui.glass_alpha = self
+            .state
+            .ui
+            .glass_active
+            .then(|| crate::frontend::theme::glass_alpha(self.state.config.glass_intensity));
 
         let mut actions = Vec::<AppAction>::new();
         ui::show_workbench(&mut self.state, ui, &mut actions);

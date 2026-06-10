@@ -55,10 +55,22 @@ pub struct AppConfig {
     /// "Reduce Transparency" setting is on. See [`crate::frontend::glass`].
     #[serde(default = "default_glass")]
     pub glass: bool,
+    /// Liquid Glass tint intensity, 0.0 (ultra-clear) ..= 1.0 (fully tinted).
+    /// Maps linearly onto the chrome-fill alpha range (see
+    /// [`crate::frontend::theme::glass_alpha`]); macOS 27-style user control over
+    /// how see-through the frosted chrome reads.
+    #[serde(default = "default_glass_intensity")]
+    pub glass_intensity: f32,
 }
 
 fn default_glass() -> bool {
     false
+}
+
+fn default_glass_intensity() -> f32 {
+    // Maps to a chrome alpha of ~110 — the historical fixed tint, so existing
+    // setups look unchanged until the user moves the slider.
+    0.35
 }
 
 impl Default for AppConfig {
@@ -70,6 +82,7 @@ impl Default for AppConfig {
             engine_overrides: HashMap::default(),
             theme: ThemeMode::default(),
             glass: default_glass(),
+            glass_intensity: default_glass_intensity(),
         }
     }
 }

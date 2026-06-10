@@ -938,6 +938,11 @@ pub struct UiState {
     /// Transparency is off). Drives the transparent clear color and the
     /// semi-transparent chrome fills. See [`crate::frontend::glass`].
     pub glass_active: bool,
+    /// Effective chrome-fill alpha while glass is revealed this frame, mapped
+    /// from the persisted `glass_intensity`; `None` means opaque chrome (glass
+    /// off, unsupported, or Reduce Transparency on). Resolved next to
+    /// `glass_active` and passed to [`crate::frontend::theme::chrome_fill`].
+    pub glass_alpha: Option<u8>,
     pub hovered_atom: Option<usize>,
     pub selection: AtomSelection,
     pub viewport: ViewportVisualState,
@@ -977,6 +982,7 @@ impl Default for UiState {
             viewport_cache: ViewportCache::default(),
             gpu_ready: false,
             glass_active: false,
+            glass_alpha: None,
             hovered_atom: None,
             selection: AtomSelection::default(),
             viewport: ViewportVisualState::default(),

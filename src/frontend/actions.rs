@@ -138,6 +138,10 @@ pub enum AppAction {
     SetThemeMode(crate::backend::config::ThemeMode),
     /// Toggle the Apple-style frosted-glass material and persist it.
     SetGlass(bool),
+    /// Set the Liquid Glass tint intensity (0..=1, clear → tinted). `commit`
+    /// persists to disk — false while the settings slider is mid-drag (live
+    /// preview only), true on release or a discrete change.
+    SetGlassIntensity { value: f32, commit: bool },
     /// Decode an MD trajectory for the given entry (from its run directory) in
     /// the background and begin playback once it is ready. The optional path
     /// selects a specific stage's trajectory (project-root-relative, as stored);

@@ -39,54 +39,69 @@ const WINDOW_CORNER_RADIUS: u8 = 10;
 pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let ctx = ui.ctx().clone();
     let pal = crate::frontend::theme::palette(ui);
-    // When frosted glass is active, the perimeter chrome (title/status/activity
-    // bars and sidebars) is painted semi-transparent so the window's vibrancy
-    // material shows through; the central panel stays opaque (see below).
-    let glass = state.ui.glass_active;
+    // When Liquid Glass is revealed, the perimeter chrome (title/status bars and
+    // sidebars) is painted semi-transparent at the user's chosen tint intensity
+    // so the window's vibrancy material shows through; the central panel stays
+    // opaque (see below). `None` means opaque chrome.
+    let glass = state.ui.glass_alpha;
 
     render_window_resize_handles(&ctx);
 
+    // Frame-consistent snapshot of the sidebar visibility: the toggle button,
+    // View menu, and settings checkbox can all flip `show_primary_sidebar`
+    // mid-frame, and the corner radii, panel order, and the title bar's
+    // traffic-light spacer must agree within a single frame.
+    let sidebar_visible = state.ui.layout.show_primary_sidebar;
+
+    // Rounded window corners (non-macOS, where the app draws its own chrome).
+    // With the full-height sidebar visible it owns the left corners (nw + sw);
+    // the title/status bars keep only their right ones. With the sidebar hidden
+    // the top and bottom bars span the full width and reclaim all four.
     #[cfg(target_os = "macos")]
-    let (top_corners, bottom_corners) = (egui::CornerRadius::ZERO, egui::CornerRadius::ZERO);
-    #[cfg(not(target_os = "macos"))]
-    let (top_corners, bottom_corners) = (
-        egui::CornerRadius {
-            nw: WINDOW_CORNER_RADIUS,
-            ne: WINDOW_CORNER_RADIUS,
-            sw: 0,
-            se: 0,
-        },
-        egui::CornerRadius {
-            nw: 0,
-            ne: 0,
-            sw: WINDOW_CORNER_RADIUS,
-            se: WINDOW_CORNER_RADIUS,
-        },
+    let (sidebar_corners, top_corners, bottom_corners) = (
+        egui::CornerRadius::ZERO,
+        egui::CornerRadius::ZERO,
+        egui::CornerRadius::ZERO,
     );
-
-    egui::Panel::top("title_bar")
-        .exact_size(32.0)
-        .frame(
-            Frame::default()
-                .fill(crate::frontend::theme::chrome_fill(pal.title_bar, glass))
-                .corner_radius(top_corners)
-                .inner_margin(Margin::symmetric(8, 3)),
+    #[cfg(not(target_os = "macos"))]
+    let (sidebar_corners, top_corners, bottom_corners) = if sidebar_visible {
+        (
+            egui::CornerRadius {
+                nw: WINDOW_CORNER_RADIUS,
+                ne: 0,
+                sw: WINDOW_CORNER_RADIUS,
+                se: 0,
+            },
+            egui::CornerRadius {
+                nw: 0,
+                ne: WINDOW_CORNER_RADIUS,
+                sw: 0,
+                se: 0,
+            },
+            egui::CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: 0,
+                se: WINDOW_CORNER_RADIUS,
+            },
         )
-        .show_inside(ui, |ui| render_title_bar(state, ui, actions));
-
-    egui::Panel::bottom("status_bar")
-        .exact_size(24.0)
-        .frame(
-            Frame::default()
-                .fill(crate::frontend::theme::chrome_fill(pal.status_bar, glass))
-                .corner_radius(bottom_corners)
-                .inner_margin(Margin::symmetric(10, 3)),
+    } else {
+        (
+            egui::CornerRadius::ZERO,
+            egui::CornerRadius {
+                nw: WINDOW_CORNER_RADIUS,
+                ne: WINDOW_CORNER_RADIUS,
+                sw: 0,
+                se: 0,
+            },
+            egui::CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: WINDOW_CORNER_RADIUS,
+                se: WINDOW_CORNER_RADIUS,
+            },
         )
-        .show_inside(ui, |ui| render_status_bar(state, ui));
-
-    // No separate vertical activity rail (Xcode-style): the primary-view switcher
-    // lives as a compact icon row at the top of the single left sidebar (see
-    // `render_primary_sidebar`), and the title bar carries the show/hide toggle.
+    };
 
     // Sidebars are fixed-width panels driven by our own proximity-revealed
     // resize dividers (wired after the central panel; see `render_resize_divider`).
@@ -107,7 +122,14 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
     let mut primary_rendered_w = state.ui.layout.primary_sidebar_width;
     let mut secondary_rendered_w = state.ui.layout.secondary_sidebar_width;
 
-    if state.ui.layout.show_primary_sidebar {
+    // The primary sidebar is added FIRST so it spans the full window height —
+    // the macOS 27 edge-to-edge sidebar: it reaches the window's top and bottom
+    // edges, the traffic lights overlay its header strip, and the title/status
+    // bars span only from its right edge to the window's right edge. (No
+    // separate vertical activity rail: the primary-view switcher lives in the
+    // sidebar's header strip — see `render_primary_sidebar` — and the title bar
+    // carries the show/hide toggle.)
+    if sidebar_visible {
         let max_w = sidebar_max_width(ctx.viewport_rect().width());
         // Clamp to the displayable range for this frame; the stored value is
         // intentionally NOT written back so the user's desired width is
@@ -124,13 +146,41 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
             .frame(
                 Frame::default()
                     .fill(crate::frontend::theme::chrome_fill(pal.sidebar, glass))
-                    .inner_margin(Margin::symmetric(10, 10)),
+                    .corner_radius(sidebar_corners)
+                    // No top margin: the 32px header strip (aligned with the
+                    // title bar band) manages its own padding.
+                    .inner_margin(Margin {
+                        left: 10,
+                        right: 10,
+                        top: 0,
+                        bottom: 10,
+                    }),
             )
             .show_inside(ui, |ui| {
                 render_pinned(ui, |ui| render_primary_sidebar(state, ui, actions));
             });
         primary_rendered_w = width;
     }
+
+    egui::Panel::top("title_bar")
+        .exact_size(32.0)
+        .frame(
+            Frame::default()
+                .fill(crate::frontend::theme::chrome_fill(pal.title_bar, glass))
+                .corner_radius(top_corners)
+                .inner_margin(Margin::symmetric(8, 3)),
+        )
+        .show_inside(ui, |ui| render_title_bar(state, ui, actions));
+
+    egui::Panel::bottom("status_bar")
+        .exact_size(24.0)
+        .frame(
+            Frame::default()
+                .fill(crate::frontend::theme::chrome_fill(pal.status_bar, glass))
+                .corner_radius(bottom_corners)
+                .inner_margin(Margin::symmetric(10, 3)),
+        )
+        .show_inside(ui, |ui| render_status_bar(state, ui));
 
     if state.ui.layout.show_secondary_sidebar {
         let max_w = sidebar_max_width(ctx.viewport_rect().width());
@@ -224,18 +274,24 @@ pub fn show_workbench(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec
         // than stopping at the bottom panel's top edge.
         let divider_bottom = content_bottom;
         let max_w = sidebar_max_width(vp.width());
-        if state.ui.layout.show_primary_sidebar {
+        // Keyed off the same frame-start snapshot as the panel itself: the title
+        // bar's toggle (rendered in between) can flip the live flag mid-frame,
+        // and the divider must match the sidebar actually drawn this frame.
+        if sidebar_visible {
             // Draw the divider at the panel's rendered edge (see the note above the
             // sidebar panels); drag emits AppAction::ResizeSidebar which the
             // dispatcher applies to the stored `primary_sidebar_width`.
+            // The primary sidebar is edge-to-edge (full window height), so its
+            // divider runs from the window's top edge to its bottom edge rather
+            // than stopping at the title/status bars.
             let line_x = vp.left() + primary_rendered_w;
             match render_resize_divider(
                 &ctx,
                 "primary_sidebar_resize",
                 DividerKind::Vertical,
                 Rect::from_min_max(
-                    egui::pos2(line_x - DIVIDER_GRAB_HALF_WIDTH, content_top),
-                    egui::pos2(line_x + DIVIDER_GRAB_HALF_WIDTH, divider_bottom),
+                    egui::pos2(line_x - DIVIDER_GRAB_HALF_WIDTH, vp.top()),
+                    egui::pos2(line_x + DIVIDER_GRAB_HALF_WIDTH, vp.bottom()),
                 ),
                 line_x,
                 DividerConfig {
@@ -608,9 +664,14 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
 
         // Sidebar show/hide toggle (Xcode/Finder-style). With no vertical activity
         // rail, this is the only way to reopen a hidden sidebar — so it lives in the
-        // title bar, always reachable. On macOS, sit just right of the traffic lights.
+        // title bar, always reachable. On macOS the spacer clears the native traffic
+        // lights, but only while the sidebar is hidden (title bar at full width);
+        // with the full-height sidebar visible, the lights overlay the sidebar and
+        // the title bar starts at its right edge.
         #[cfg(target_os = "macos")]
-        ui.add_space(64.0);
+        if !state.ui.layout.show_primary_sidebar {
+            ui.add_space(MACOS_TRAFFIC_LIGHTS_WIDTH - 8.0);
+        }
         {
             let shown = state.ui.layout.show_primary_sidebar;
             if with_core_button_style(ui, shown, |ui| {
@@ -777,7 +838,7 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
                         if crate::frontend::glass::supported() {
                             ui.separator();
                             let mut glass = state.config.glass;
-                            if ui.checkbox(&mut glass, "Frosted glass").changed() {
+                            if ui.checkbox(&mut glass, "Liquid Glass").changed() {
                                 actions.push(AppAction::SetGlass(glass));
                             }
                         }
@@ -806,7 +867,17 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
         });
     });
 
-    let left_reserved_width = if show_inline_menus { 300.0 } else { 96.0 };
+    // Width of the non-draggable leading cluster, measured from the title bar's
+    // own left edge (which with the full-height sidebar visible is the sidebar's
+    // right edge, not the window's): inline menus, or the sidebar toggle plus —
+    // when the sidebar is hidden — the macOS traffic-light spacer.
+    let left_reserved_width = if show_inline_menus {
+        300.0
+    } else if state.ui.layout.show_primary_sidebar {
+        48.0
+    } else {
+        96.0
+    };
     let right_reserved_width = if cfg!(target_os = "macos") {
         0.0
     } else {
@@ -820,12 +891,10 @@ fn render_title_bar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<A
     );
     let drag_strip_top = title_bar_rect.top() + 2.0;
     let drag_strip_bottom = title_bar_rect.bottom() - 2.0;
+    let left_drag_edge = title_bar_rect.left() + left_reserved_width;
     let left_drag_rect = Rect::from_min_max(
-        egui::pos2(left_reserved_width, drag_strip_top),
-        egui::pos2(
-            center_drag_rect.left().max(left_reserved_width),
-            drag_strip_bottom,
-        ),
+        egui::pos2(left_drag_edge, drag_strip_top),
+        egui::pos2(center_drag_rect.left().max(left_drag_edge), drag_strip_bottom),
     );
     let right_drag_rect = Rect::from_min_max(
         egui::pos2(
@@ -933,33 +1002,96 @@ fn render_pinned(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.advance_cursor_after_rect(rect);
 }
 
+/// Height of the full-height sidebar's header strip, matched to the title bar's
+/// 32px so the chrome band reads as one continuous row across the
+/// sidebar/toolbar boundary (macOS 27 edge-to-edge sidebar).
+const SIDEBAR_HEADER_HEIGHT: f32 = 32.0;
+/// Width reserved at the sidebar's top-left for the native macOS traffic
+/// lights, which overlay the full-height sidebar. The title bar's own spacer
+/// (used when the sidebar is hidden) is this minus its 8px inner margin.
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHTS_WIDTH: f32 = 72.0;
+
 fn render_primary_sidebar(state: &mut AppState, ui: &mut egui::Ui, actions: &mut Vec<AppAction>) {
     let pal = crate::frontend::theme::palette(ui);
-    // Xcode-style primary-view switcher: a compact row of icon buttons at the top
-    // of the single sidebar (replaces the old vertical activity rail). The active
-    // view is accent-tinted and hovering shows its label. Hiding the sidebar is the
-    // title bar toggle's job now, so there's no in-sidebar caret.
-    ui.horizontal(|ui| {
-        for view in PrimaryView::all() {
-            let selected = state.ui.layout.active_primary_view == *view;
-            let response = with_core_button_style(ui, selected, |ui| {
-                ui.add_sized(
-                    [32.0, 26.0],
-                    Button::new(
-                        RichText::new(view.icon())
-                            .strong()
-                            .color(activity_icon_color(*view, &pal, selected)),
-                    )
-                    .selected(selected),
-                )
-            })
-            .on_hover_text(view.label());
-            if response.clicked() {
-                state.ui.layout.active_primary_view = *view;
-            }
+    // Header strip: the Xcode-style primary-view switcher (compact icon row;
+    // the active view is accent-tinted, hovering shows its label). The sidebar
+    // panel has no top margin, so this strip starts at the window's top edge —
+    // on macOS the native traffic lights overlay its left end. Hiding the
+    // sidebar is the title bar toggle's job, so there's no in-sidebar caret.
+    let strip_rect = Rect::from_min_size(
+        ui.max_rect().min,
+        egui::vec2(ui.max_rect().width(), SIDEBAR_HEADER_HEIGHT),
+    );
+    let icons_rect = ui
+        .allocate_ui_with_layout(
+            strip_rect.size(),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                // Clear the native traffic lights; the sidebar's 10px left
+                // margin already supplies part of the inset.
+                #[cfg(target_os = "macos")]
+                ui.add_space(MACOS_TRAFFIC_LIGHTS_WIDTH - 10.0);
+                for view in PrimaryView::all() {
+                    let selected = state.ui.layout.active_primary_view == *view;
+                    let response = with_core_button_style(ui, selected, |ui| {
+                        ui.add_sized(
+                            [32.0, 26.0],
+                            Button::new(
+                                RichText::new(view.icon())
+                                    .strong()
+                                    .color(activity_icon_color(*view, &pal, selected)),
+                            )
+                            .selected(selected),
+                        )
+                    })
+                    .on_hover_text(view.label());
+                    if response.clicked() {
+                        state.ui.layout.active_primary_view = *view;
+                    }
+                }
+                ui.min_rect()
+            },
+        )
+        .inner;
+
+    // Hairline at the strip's bottom edge, level with the title bar's own
+    // bottom separator so the line runs continuously across the window.
+    ui.painter().hline(
+        strip_rect.x_range(),
+        strip_rect.bottom(),
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+
+    // The strip's blank areas drag the window, like the title bar (on macOS the
+    // leading zone sits under the traffic lights, whose native buttons consume
+    // their own clicks — the gaps still drag, matching native sidebars). The
+    // zones exclude the icon cluster so the buttons keep their clicks.
+    let leading = Rect::from_min_max(
+        strip_rect.min,
+        egui::pos2(icons_rect.left().clamp(strip_rect.left(), strip_rect.right()), strip_rect.bottom()),
+    );
+    let trailing = Rect::from_min_max(
+        egui::pos2(icons_rect.right().clamp(strip_rect.left(), strip_rect.right()), strip_rect.top()),
+        strip_rect.max,
+    );
+    for (id, rect) in [
+        ("sidebar_header_drag_lead", leading),
+        ("sidebar_header_drag_trail", trailing),
+    ] {
+        if rect.width() <= 0.0 {
+            continue;
         }
-    });
-    ui.separator();
+        let response = ui.interact(rect, Id::new(id), Sense::click_and_drag());
+        if response.drag_started() {
+            ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+        if response.double_clicked() && !cfg!(target_os = "macos") {
+            let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        }
+    }
+    ui.add_space(8.0);
 
     match state.ui.layout.active_primary_view {
         PrimaryView::EntryList => render_entry_list(state, ui, actions),
@@ -2171,11 +2303,36 @@ fn viewport_visual_settings_view(
                 if crate::frontend::glass::supported() {
                     let mut glass = state.config.glass;
                     if ui
-                        .checkbox(&mut glass, "Frosted glass (translucent sidebars)")
+                        .checkbox(&mut glass, "Liquid Glass (frosted window chrome)")
                         .changed()
                     {
                         actions.push(AppAction::SetGlass(glass));
                     }
+                    // macOS 27-style intensity slider: Clear ↔ Tinted. Mid-drag
+                    // updates preview live without persisting; release commits.
+                    ui.indent("glass_intensity", |ui| {
+                        ui.horizontal(|ui| {
+                            let pal = crate::frontend::theme::palette(ui);
+                            ui.label(RichText::new("Clear").small().color(pal.text_tertiary));
+                            let mut intensity = state.config.glass_intensity;
+                            let response = ui.add_enabled(
+                                state.config.glass,
+                                egui::Slider::new(&mut intensity, 0.0..=1.0).show_value(false),
+                            );
+                            ui.label(RichText::new("Tinted").small().color(pal.text_tertiary));
+                            if response.changed() {
+                                actions.push(AppAction::SetGlassIntensity {
+                                    value: intensity,
+                                    commit: !response.dragged(),
+                                });
+                            } else if response.drag_stopped() {
+                                actions.push(AppAction::SetGlassIntensity {
+                                    value: intensity,
+                                    commit: true,
+                                });
+                            }
+                        });
+                    });
                 }
             });
 

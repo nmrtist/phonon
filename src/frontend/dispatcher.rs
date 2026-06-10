@@ -174,6 +174,7 @@ pub fn dispatch(state: &mut AppState, action: AppAction, ctx: &egui::Context) {
         AppAction::RunConsoleCommand(command) => run_console_command(state, &command),
         AppAction::SetThemeMode(mode) => set_theme_mode(state, mode, ctx),
         AppAction::SetGlass(on) => set_glass(state, on),
+        AppAction::SetGlassIntensity { value, commit } => set_glass_intensity(state, value, commit),
         AppAction::LoadTrajectory(entry_id, trajectory) => {
             load_trajectory(state, entry_id, trajectory, ctx)
         }
@@ -261,6 +262,17 @@ fn set_glass(state: &mut AppState, on: bool) {
     state.config.glass = on;
     if let Err(error) = save_config(&state.config) {
         state.set_message(format!("Could not save glass preference: {error}"));
+    }
+}
+
+/// Update the Liquid Glass tint intensity. The chrome alpha is re-resolved from
+/// `config.glass_intensity` next frame, so a mid-drag update (`commit == false`)
+/// previews live without writing settings.json dozens of times per second; the
+/// release event commits once.
+fn set_glass_intensity(state: &mut AppState, value: f32, commit: bool) {
+    state.config.glass_intensity = value.clamp(0.0, 1.0);
+    if commit && let Err(error) = save_config(&state.config) {
+        state.set_message(format!("Could not save glass intensity: {error}"));
     }
 }
 

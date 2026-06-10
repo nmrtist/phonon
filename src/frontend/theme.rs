@@ -149,23 +149,33 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from(a * (1.0 - t) + b * t)
 }
 
-/// Alpha applied to chrome surface fills when frosted glass is active, so the
-/// macOS vibrancy material behind the window shows through. Tunable: lower means
-/// more see-through glass, higher means a more solid tint (and better text
-/// contrast over busy wallpapers).
-pub const GLASS_FILL_ALPHA: u8 = 110;
+/// Chrome-fill alpha range for the Liquid Glass tint, mapped from the user's
+/// persisted `glass_intensity` (0..=1) by [`glass_alpha`]. The minimum stays
+/// clearly translucent ("ultra-clear"); the maximum is heavily tinted but never
+/// fully opaque, so the backdrop blur always reads at least faintly.
+pub const GLASS_ALPHA_MIN: f32 = 45.0;
+pub const GLASS_ALPHA_MAX: f32 = 230.0;
 
-/// Fill for an app-drawn chrome surface (title bar, activity bar, sidebars,
-/// status bar). When `glass` is on, the opaque palette color is made
-/// semi-transparent so the window's vibrancy material shows through; otherwise
-/// it is returned unchanged. The central panel and 3D viewport keep their opaque
-/// fills, so the glass never sits behind dense content or the GPU scene.
-pub fn chrome_fill(base: Color32, glass: bool) -> Color32 {
-    if glass {
-        let [r, g, b, _] = base.to_array();
-        Color32::from_rgba_unmultiplied(r, g, b, GLASS_FILL_ALPHA)
-    } else {
-        base
+/// Map the persisted 0..=1 Liquid Glass intensity onto the effective chrome
+/// alpha (macOS 27-style "Clear ↔ Tinted" slider).
+pub fn glass_alpha(intensity: f32) -> u8 {
+    egui::lerp(GLASS_ALPHA_MIN..=GLASS_ALPHA_MAX, intensity.clamp(0.0, 1.0)).round() as u8
+}
+
+/// Fill for an app-drawn chrome surface (title bar, sidebars, status bar).
+/// `glass` is `Some(alpha)` while Liquid Glass is revealed this frame (resolved
+/// once per frame into `ui.glass_alpha`): the opaque palette color is made
+/// semi-transparent at that alpha so the window's vibrancy material shows
+/// through. `None` returns the opaque color unchanged. The central panel and 3D
+/// viewport keep their opaque fills, so the glass never sits behind dense
+/// content or the GPU scene.
+pub fn chrome_fill(base: Color32, glass: Option<u8>) -> Color32 {
+    match glass {
+        Some(alpha) => {
+            let [r, g, b, _] = base.to_array();
+            Color32::from_rgba_unmultiplied(r, g, b, alpha)
+        }
+        None => base,
     }
 }
 
