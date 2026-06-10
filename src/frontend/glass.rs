@@ -98,6 +98,48 @@ pub fn reduce_transparency() -> bool {
     false
 }
 
+/// Keep the native appearance — and with it the vibrancy material — in step
+/// with the app's theme preference.
+///
+/// AppKit resolves the `NSVisualEffectView` material from the window's
+/// *effective appearance*, which follows the system unless overridden. With the
+/// app forced Dark on a light-mode system the window frosts with the *light*
+/// material, and the dark translucent chrome over a bright blur reads washed
+/// out and wrong (the reverse mismatch looks just as bad). Forcing the
+/// application-wide appearance keeps the glass matched to the UI theme;
+/// `System` clears the override so AppKit follows the OS again. Must run on the
+/// main thread (called from [`crate::frontend::theme::set_preference`]).
+#[cfg(target_os = "macos")]
+pub fn sync_appearance(mode: crate::backend::config::ThemeMode) {
+    use crate::backend::config::ThemeMode;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
+    let appearance_name = match mode {
+        ThemeMode::System => None,
+        ThemeMode::Light => Some("NSAppearanceNameAqua"),
+        ThemeMode::Dark => Some("NSAppearanceNameDarkAqua"),
+    };
+    // SAFETY: reads the shared NSApplication and assigns an NSAppearance (or nil
+    // to clear the override); both are plain AppKit property accesses on the
+    // main thread.
+    unsafe {
+        let app: *mut AnyObject =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let appearance: *mut AnyObject = match appearance_name {
+            Some(name) => {
+                let name = NSString::from_str(name);
+                objc2::msg_send![objc2::class!(NSAppearance), appearanceNamed: &*name]
+            }
+            None => core::ptr::null_mut(),
+        };
+        let _: () = objc2::msg_send![app, setAppearance: appearance];
+    }
+}
+
 /// Install any one-time OS backdrop effect for the glass material, at startup.
 /// Dispatched per platform (macOS vibrancy, Windows Acrylic, Linux none). Safe to
 /// call regardless of the user's current preference: when glass is off, the

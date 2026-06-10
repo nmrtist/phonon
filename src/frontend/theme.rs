@@ -256,6 +256,10 @@ pub fn set_preference(ctx: &egui::Context, mode: ThemeMode) {
         ThemeMode::Dark => egui::ThemePreference::Dark,
     };
     ctx.set_theme(preference);
+    // Keep the native window appearance (and the vibrancy material behind the
+    // Liquid Glass) in step with a forced theme; see `glass::sync_appearance`.
+    #[cfg(target_os = "macos")]
+    crate::frontend::glass::sync_appearance(mode);
 }
 
 /// Build the native-leaning [`Visuals`] for one theme, sourced from its palette.
